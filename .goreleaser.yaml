@@ -1,0 +1,32 @@
+version: 2
+
+builds:
+  - main: ./cmd/waypoint
+    env: [CGO_ENABLED=0]
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+    ldflags: ["-s -w -X main.version={{.Version}}"]
+
+archives:
+  - formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: checksums.txt
+
+brews:
+  - skip_upload: '{{ if index .Env "HOMEBREW_TAP_TOKEN" }}false{{ else }}true{{ end }}'
+    repository:
+      owner: Sirius-Star42
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_TOKEN }}"
+    homepage: https://github.com/Sirius-Star42/waypoint
+    description: See where requests go on your machine or server, and why they break
+    license: MIT
+    test: |
+      system "#{bin}/waypoint", "--version"
+
+changelog:
+  sort: asc
+  filters:
+    exclude: ["^docs:", "^test:"]

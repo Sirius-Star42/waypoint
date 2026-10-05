@@ -1,0 +1,129 @@
+[
+  {
+    "Id": "aaa111",
+    "Name": "/shop-api-1",
+    "RestartCount": 7,
+    "Config": {
+      "Image": "shop-api",
+      "Env": [
+        "DATABASE_URL=postgres://app:secret@localhost:5432/app",
+        "PORT=8080"
+      ],
+      "ExposedPorts": {
+        "8080/tcp": {}
+      },
+      "Labels": {
+        "com.docker.compose.project": "shop",
+        "com.docker.compose.service": "api",
+        "com.docker.compose.project.working_dir": "/home/me/shop",
+        "com.docker.compose.project.config_files": "/home/me/shop/compose.yaml"
+      }
+    },
+    "State": {
+      "Status": "restarting",
+      "ExitCode": 1
+    },
+    "NetworkSettings": {
+      "Ports": {
+        "8080/tcp": [
+          {
+            "HostIp": "0.0.0.0",
+            "HostPort": "8080"
+          },
+          {
+            "HostIp": "::",
+            "HostPort": "8080"
+          }
+        ]
+      },
+      "Networks": {
+        "shop_default": {
+          "Aliases": [
+            "shop-api-1",
+            "api"
+          ],
+          "DNSNames": [
+            "shop-api-1",
+            "api",
+            "aaa111"
+          ]
+        }
+      }
+    }
+  },
+  {
+    "Id": "bbb222",
+    "Name": "/shop-postgres-1",
+    "RestartCount": 0,
+    "Config": {
+      "Image": "postgres:16",
+      "Env": [
+        "POSTGRES_PASSWORD=secret"
+      ],
+      "ExposedPorts": {
+        "5432/tcp": {}
+      },
+      "Labels": {
+        "com.docker.compose.project": "shop",
+        "com.docker.compose.service": "postgres"
+      }
+    },
+    "State": {
+      "Status": "running",
+      "ExitCode": 0,
+      "Health": {
+        "Status": "unhealthy",
+        "Log": [
+          {
+            "Output": "ok"
+          },
+          {
+            "Output": "pg_isready: no response\n"
+          }
+        ]
+      }
+    },
+    "NetworkSettings": {
+      "Ports": {
+        "5432/tcp": null
+      },
+      "Networks": {
+        "shop_default": {
+          "Aliases": [
+            "postgres"
+          ],
+          "DNSNames": null
+        }
+      }
+    }
+  },
+  {
+    "Id": "ccc333",
+    "Name": "/old-worker",
+    "RestartCount": 0,
+    "Config": {
+      "Image": "worker",
+      "Env": [],
+      "ExposedPorts": null,
+      "Labels": {}
+    },
+    "State": {
+      "Status": "exited",
+      "ExitCode": 137
+    },
+    "NetworkSettings": {
+      "Ports": {},
+      "Networks": {}
+    },
+    "HostConfig": {
+      "PortBindings": {
+        "9000/tcp": [
+          {
+            "HostIp": "",
+            "HostPort": "9000"
+          }
+        ]
+      }
+    }
+  }
+]

@@ -1,0 +1,31 @@
+# A small stack with a classic bug: the API's DATABASE_URL points to localhost.
+# docker compose up -d, then run: waypoint   and   waypoint localhost:8088/api/
+services:
+  nginx:
+    image: nginx:1.27-alpine
+    ports: ["8088:80"]
+    volumes: ["./nginx/default.conf:/etc/nginx/conf.d/default.conf:ro"]
+    depends_on: [api]
+
+  api:
+    image: python:3.12-alpine
+    command: ["python", "/app/server.py"]
+    volumes: ["./api:/app:ro"]
+    environment:
+      DATABASE_URL: postgres://app:secret@localhost:5432/app
+      REDIS_URL: redis://redis:6379
+    expose: ["8080"]
+    restart: unless-stopped
+    depends_on: [postgres, redis]
+
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: app
+      POSTGRES_PASSWORD: secret
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "app"]
+      interval: 5s
+
+  redis:
+    image: redis:7-alpine

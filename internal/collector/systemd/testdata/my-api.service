@@ -1,0 +1,6 @@
+[Unit]
+Description=My API
+[Service]
+EnvironmentFile=-testdata/my-api.env
+ExecStart=/opt/my-api/bin/server
+Restart=always
