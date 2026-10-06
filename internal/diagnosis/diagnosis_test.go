@@ -14,6 +14,7 @@ import (
 
 	"github.com/Sirius-Star42/waypoint/internal/collector/docker"
 	"github.com/Sirius-Star42/waypoint/internal/collector/network"
+	"github.com/Sirius-Star42/waypoint/internal/nginx"
 	"github.com/Sirius-Star42/waypoint/internal/runner"
 )
 
@@ -313,5 +314,22 @@ func TestDialFromRespectsTimeout(t *testing.T) {
 	}
 	if r.Class != network.Timeout {
 		t.Errorf("class = %s", r.Class)
+	}
+}
+
+func TestTLSCheckFromConfig(t *testing.T) {
+	e := testEnv(t, nil)
+	s := &nginx.Server{Names: []string{"shop.example.com"}, Pos: "/etc/nginx/sites-enabled/shop:1",
+		Protocols: []string{"TLSv1", "TLSv1.1", "TLSv1.2"}, ProtocolsPos: "/etc/nginx/nginx.conf:30"}
+	f, st := e.tlsCheck("shop.example.com", 443, s, false)
+	if st == nil || st.Status != Warn || st.Detail != "TLS 1.0, 1.1, 1.2" {
+		t.Fatalf("step = %+v", st)
+	}
+	if f == nil || !strings.Contains(f.Title, "TLS 1.0 and TLS 1.1") || f.Fixes[0].Command != "ssl_protocols TLSv1.2 TLSv1.3;" {
+		t.Errorf("finding = %+v", f)
+	}
+	s.Protocols = []string{"TLSv1.2", "TLSv1.3"}
+	if f, st := e.tlsCheck("shop.example.com", 443, s, false); f != nil || st.Status != Pass {
+		t.Errorf("modern config: %+v %+v", f, st)
 	}
 }

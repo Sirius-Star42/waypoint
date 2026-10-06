@@ -24,8 +24,12 @@ type Server struct {
 	Listens   []Listen
 	Locations []*Location
 	Cert      string
-	Return    *Return // server-level return: applies before any location
-	Pos       string
+	// Protocols is the effective ssl_protocols (server, else http level) and where it is set;
+	// empty means nginx's built-in default.
+	Protocols    []string
+	ProtocolsPos string
+	Return       *Return // server-level return: applies before any location
+	Pos          string
 	// Shadowed holds, per port, the names an earlier server already claims there.
 	Shadowed map[int][]string
 }
@@ -154,9 +158,14 @@ func Build(dirs []*Directive) *Config {
 			continue
 		}
 		root := directiveArg(d.Block, "root")
+		protos := directive(d.Block, "ssl_protocols")
 		for _, s := range d.Block {
 			if s.Name == "server" && s.HasBlock {
-				cfg.Servers = append(cfg.Servers, buildServer(cfg, s, root))
+				srv := buildServer(cfg, s, root)
+				if srv.Protocols == nil && protos != nil {
+					srv.Protocols, srv.ProtocolsPos = protos.Args, protos.Pos()
+				}
+				cfg.Servers = append(cfg.Servers, srv)
 			}
 		}
 	}
@@ -190,6 +199,8 @@ func buildServer(cfg *Config, d *Directive, httpRoot string) *Server {
 			}
 		case "server_name":
 			s.Names = append(s.Names, c.Args...)
+		case "ssl_protocols":
+			s.Protocols, s.ProtocolsPos = c.Args, c.Pos()
 		case "ssl_certificate":
 			if len(c.Args) > 0 && s.Cert == "" {
 				s.Cert = c.Args[0]
@@ -392,6 +403,15 @@ func parseEndpoint(s string, defPort int) (Endpoint, bool) {
 		return Endpoint{}, false
 	}
 	return Endpoint{Host: host, Port: p}, true
+}
+
+func directive(dirs []*Directive, name string) *Directive {
+	for _, d := range dirs {
+		if d.Name == name {
+			return d
+		}
+	}
+	return nil
 }
 
 func directiveArg(dirs []*Directive, name string) string {
