@@ -58,7 +58,7 @@ APPS  4 apps on this machine · 2 with problems
     ! started by hand, not by systemd or Docker: it won't come back after a reboot or crash
     ! no nginx route points here
 
-    system    systemd-resolve :53
+  · 1 system process hidden (-v to show)
 
 PROBLEMS  3 problems, most important first
 
@@ -90,8 +90,10 @@ PROBLEMS  3 problems, most important first
 waypoint <url or port> traces one request · -v shows evidence and logs for every problem
 ```
 
-`waypoint map --mermaid` draws the same picture as a diagram that renders on GitHub, ready to paste
-into your server's README or wiki:
+`waypoint map --open` opens the same picture as a diagram in your browser (over SSH it prints the
+link instead). The diagram travels in the link's `#` fragment, which is never sent to a server.
+`waypoint map --mermaid` prints it as Mermaid that renders on GitHub, ready to paste into your
+server's README or wiki:
 
 ```mermaid
 flowchart LR
@@ -184,7 +186,8 @@ waypoint                        # sites, the apps behind them, how each runs, an
 waypoint 8080                   # why isn't localhost:8080 working?
 waypoint api.example.com        # follow a domain through nginx to the app
 waypoint https://x.dev/api/v1   # trace one URL, including which location block matches
-waypoint map --mermaid          # the same as a Mermaid diagram
+waypoint map --open             # the same as a diagram in your browser
+waypoint map --mermaid          # the same as Mermaid, to paste into a README
 ```
 
 | Flag | |

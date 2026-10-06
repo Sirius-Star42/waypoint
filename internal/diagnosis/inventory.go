@@ -18,11 +18,18 @@ import (
 type Inventory struct {
 	Apps      []*App
 	System    []string
-	Stopped   []string
+	Stopped   []StoppedContainer
 	Unknown   []int
 	Elsewhere []Remote
 	Issues    []*Finding
 	keys      map[string]appRef
+}
+
+// StoppedContainer is a container outside any compose project that is no longer running.
+type StoppedContainer struct {
+	Name  string
+	State string
+	At    time.Time
 }
 
 type Remote struct {
@@ -31,16 +38,17 @@ type Remote struct {
 }
 
 type App struct {
-	Name     string
-	Kind     string
-	Status   Status
-	State    string
-	Facts    []Fact
-	Ports    []AppPort
-	Services []*AppService
-	Notes    []string
-	Stopped  bool
-	single   *AppService
+	Name      string
+	Kind      string
+	Status    Status
+	State     string
+	Facts     []Fact
+	Ports     []AppPort
+	Services  []*AppService
+	Notes     []string
+	Stopped   bool
+	StoppedAt time.Time
+	single    *AppService
 }
 
 type Fact struct{ Label, Value string }
@@ -63,6 +71,16 @@ type AppService struct {
 type appRef struct {
 	app *App
 	svc *AppService
+}
+
+// Running reports whether any app on the machine is running.
+func (inv *Inventory) Running() bool {
+	for _, a := range inv.Apps {
+		if !a.Stopped {
+			return true
+		}
+	}
+	return false
 }
 
 // AppOf finds the app (and compose service) behind a probe.
@@ -187,6 +205,9 @@ func (e *Env) Inventory() *Inventory {
 		if a.Stopped != b.Stopped {
 			return b.Stopped
 		}
+		if a.Stopped && !a.StoppedAt.Equal(b.StoppedAt) {
+			return a.StoppedAt.After(b.StoppedAt)
+		}
 		if (a.Status == Fail) != (b.Status == Fail) {
 			return a.Status == Fail
 		}
@@ -204,7 +225,7 @@ func (e *Env) containerApps(inv *Inventory, snap *docker.Snapshot, routes map[st
 	var out []*App
 	for _, c := range snap.Containers {
 		if c.Project == "" && !c.Running() {
-			inv.Stopped = append(inv.Stopped, fmt.Sprintf("%s (%s)", c.Name, stoppedText(c)))
+			inv.Stopped = append(inv.Stopped, StoppedContainer{Name: c.Name, State: stoppedState(c), At: c.Finished})
 			continue
 		}
 		svc := &AppService{Name: c.DisplayName(), Container: c}
@@ -265,7 +286,8 @@ func (e *Env) containerApps(inv *Inventory, snap *docker.Snapshot, routes map[st
 			a.Status, a.Stopped = Info, true
 			a.State = "stopped"
 			if last.Year() > 1 {
-				a.State += " " + since(last) + " ago"
+				a.State += " " + Ago(last)
+				a.StoppedAt = last
 			}
 			for _, s := range a.Services {
 				s.Status = Info
@@ -284,6 +306,7 @@ func (e *Env) containerApps(inv *Inventory, snap *docker.Snapshot, routes map[st
 			a.State = fmt.Sprintf("%d of %d containers down", failed, len(a.Services))
 		}
 	}
+	sort.SliceStable(inv.Stopped, func(i, j int) bool { return inv.Stopped[i].At.After(inv.Stopped[j].At) })
 	return out
 }
 
@@ -298,9 +321,9 @@ func containerState(c *docker.Container) (Status, string) {
 	case c.Status == "restarting":
 		return Fail, fmt.Sprintf("crashing (restarted %d×)", c.RestartCount)
 	case c.Status == "exited" && c.ExitCode == 0:
-		return Info, "finished, " + stoppedText(c)
+		return Info, joinWords("finished", Ago(c.Finished))
 	case c.Status == "exited" && (c.ExitCode == 143 || c.ExitCode == 130):
-		return Warn, "stopped, " + stoppedText(c)
+		return Warn, joinWords("stopped", Ago(c.Finished))
 	}
 	return Fail, stoppedText(c)
 }
@@ -313,10 +336,20 @@ func stoppedText(c *docker.Container) string {
 			s += " with code " + strconv.Itoa(c.ExitCode)
 		}
 	}
-	if !c.Finished.IsZero() && c.Finished.Year() > 1 {
-		s += ", " + since(c.Finished) + " ago"
+	if ago := Ago(c.Finished); ago != "" {
+		s += ", " + ago
 	}
 	return s
+}
+
+func stoppedState(c *docker.Container) string {
+	if c.Status != "exited" {
+		return "stopped"
+	}
+	if c.ExitCode != 0 {
+		return "exited (code " + strconv.Itoa(c.ExitCode) + ")"
+	}
+	return "exited"
 }
 
 func (e *Env) unitApp(o *process.Owner) *App {
@@ -400,6 +433,18 @@ func since(t time.Time) string {
 		return plural(int(d.Hours()/24/30), "month")
 	}
 	return plural(int(d.Hours()/24/365), "year")
+}
+
+func joinWords(a, b string) string {
+	return strings.TrimSpace(a + " " + b)
+}
+
+// Ago is "3 hours ago", or "" when t is unknown.
+func Ago(t time.Time) string {
+	if t.IsZero() || t.Year() < 2000 {
+		return ""
+	}
+	return since(t) + " ago"
 }
 
 func plural(n int, w string) string {

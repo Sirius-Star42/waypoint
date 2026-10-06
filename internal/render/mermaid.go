@@ -1,6 +1,10 @@
 package render
 
 import (
+	"bytes"
+	"compress/zlib"
+	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
@@ -30,8 +34,8 @@ func (g *graph) add(indent, id, label string) {
 	g.lines = append(g.lines, fmt.Sprintf("%s%s[\"%s\"]", indent, id, esc(label)))
 }
 
-// Mermaid draws visitors → nginx sites → apps (grouped by how they run) → dependencies.
-func Mermaid(w io.Writer, r *diagnosis.MapReport, inv *diagnosis.Inventory) {
+// mermaidCode draws visitors → nginx sites → apps (grouped by how they run) → dependencies.
+func mermaidCode(w io.Writer, r *diagnosis.MapReport, inv *diagnosis.Inventory) {
 	g := &graph{ids: map[string]string{}}
 	used := map[*diagnosis.App]bool{}
 
@@ -119,13 +123,16 @@ func Mermaid(w io.Writer, r *diagnosis.MapReport, inv *diagnosis.Inventory) {
 	}
 
 	if inv != nil {
-		var unrouted []*diagnosis.App
+		var unrouted, stopped []*diagnosis.App
 		for _, a := range inv.Apps {
-			if r != nil && !used[a] {
+			switch {
+			case a.Stopped && !used[a]:
+				stopped = append(stopped, a)
+			case r != nil && !used[a]:
 				unrouted = append(unrouted, a)
-				continue
+			default:
+				appGraph(g, a, "  ")
 			}
-			appGraph(g, a, "  ")
 		}
 		if len(unrouted) > 0 {
 			g.lines = append(g.lines, "  subgraph unrouted[\"not behind nginx\"]")
@@ -134,9 +141,17 @@ func Mermaid(w io.Writer, r *diagnosis.MapReport, inv *diagnosis.Inventory) {
 			}
 			g.lines = append(g.lines, "  end")
 		}
+		// Stopped projects nothing routes to are one node each; their services add nothing to the map.
+		if len(stopped) > 0 {
+			g.lines = append(g.lines, "  subgraph stopped[\"stopped\"]")
+			for _, a := range stopped {
+				id, _ := g.node("app|"+a.Name, diagnosis.Info)
+				g.add("    ", id, a.Name+"<br/>"+a.Kind+" · "+plural(len(a.Services), "service")+"<br/>"+a.State)
+			}
+			g.lines = append(g.lines, "  end")
+		}
 	}
 
-	fmt.Fprintln(w, "```mermaid")
 	fmt.Fprintln(w, "flowchart LR")
 	for _, l := range append(append(g.lines, g.edges...), g.classes...) {
 		fmt.Fprintln(w, l)
@@ -145,7 +160,26 @@ func Mermaid(w io.Writer, r *diagnosis.MapReport, inv *diagnosis.Inventory) {
 	fmt.Fprintln(w, "  classDef bad stroke:#cf222e,stroke-width:2px,color:#cf222e")
 	fmt.Fprintln(w, "  classDef warn stroke:#bf8700,stroke-width:2px")
 	fmt.Fprintln(w, "  classDef info stroke:#8c959f")
+}
+
+// Mermaid prints the diagram as a fenced block, ready to paste into a README.
+func Mermaid(w io.Writer, r *diagnosis.MapReport, inv *diagnosis.Inventory) {
+	fmt.Fprintln(w, "```mermaid")
+	mermaidCode(w, r, inv)
 	fmt.Fprintln(w, "```")
+}
+
+// MermaidLink returns a mermaid.live URL that opens the diagram. The diagram is encoded in the
+// URL fragment, which browsers never send to the server.
+func MermaidLink(r *diagnosis.MapReport, inv *diagnosis.Inventory) string {
+	var code strings.Builder
+	mermaidCode(&code, r, inv)
+	state, _ := json.Marshal(map[string]any{"code": code.String(), "mermaid": `{"theme":"default"}`, "updateDiagram": true})
+	var buf bytes.Buffer
+	zw, _ := zlib.NewWriterLevel(&buf, zlib.BestCompression)
+	zw.Write(state)
+	zw.Close()
+	return "https://mermaid.live/edit#pako:" + base64.RawURLEncoding.EncodeToString(buf.Bytes())
 }
 
 func appGraph(g *graph, a *diagnosis.App, indent string) {

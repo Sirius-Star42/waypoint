@@ -56,7 +56,7 @@ func TestContainerApps(t *testing.T) {
 	if o := byName["old"]; o == nil || !o.Stopped || !strings.HasPrefix(o.State, "stopped 3 months ago") {
 		t.Errorf("a fully stopped project is stopped, not broken: %+v", o)
 	}
-	if len(inv.Stopped) != 1 || !strings.HasPrefix(inv.Stopped[0], "scratch") {
+	if len(inv.Stopped) != 1 || inv.Stopped[0].Name != "scratch" || inv.Stopped[0].State != "exited" {
 		t.Errorf("stopped = %v", inv.Stopped)
 	}
 	if a, svc := inv.AppOf(&Probe{Host: "127.0.0.1", Port: 8081}); a != shop || svc.Name != "api" {

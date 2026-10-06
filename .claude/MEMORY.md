@@ -28,6 +28,9 @@ waypoint answers the questions people get stuck on when they've forgotten their 
 - Docker via the `docker` CLI (works with Docker Desktop, Colima, OrbStack, dockerd).
 - Install: Homebrew tap (primary), `go install`, release binaries (goreleaser). No curl|sh script.
 
+## Workflow
+- At the end of every change, give the user a short commit message (don't commit it).
+
 ## Roadmap (later phases)
 - Caddy / Traefik / HAProxy support.
 - `fix` that runs a suggestion only after explicit confirmation.
