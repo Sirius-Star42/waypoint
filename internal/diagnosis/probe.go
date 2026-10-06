@@ -2,6 +2,7 @@ package diagnosis
 
 import (
 	"context"
+	"fmt"
 	"net/url"
 	"sort"
 	"strconv"
@@ -262,11 +263,20 @@ func (e *Env) probeInContainer(p *Probe, via *docker.Container) {
 // dialFrom opens a TCP connection from inside a container, using bash's /dev/tcp
 // or busybox nc, whichever the image has.
 func (e *Env) dialFrom(c *docker.Container, host string, port int) network.Result {
-	script := `if command -v bash >/dev/null 2>&1; then exec bash -c "exec 3<>/dev/tcp/$0/$1"; else exec nc -z -w 3 "$0" "$1"; fi`
+	secs := strconv.Itoa(max(1, int(e.Timeout.Seconds()+0.5)))
+	script := `T=""; command -v timeout >/dev/null 2>&1 && T="timeout $2"
+if command -v bash >/dev/null 2>&1; then exec $T bash -c "exec 3<>/dev/tcp/$0/$1"; else exec nc -z -w "$2" "$0" "$1"; fi`
+	// docker exec itself adds startup time; the in-container timeout above is the real limit.
+	ctx, cancel := context.WithTimeout(e.Ctx, e.Timeout+2*time.Second)
+	defer cancel()
 	start := time.Now()
-	out, err := e.Runner.Combined(e.Ctx, "docker", "exec", c.Name, "sh", "-c", script, host, strconv.Itoa(port))
+	out, err := e.Runner.Combined(ctx, "docker", "exec", c.Name, "sh", "-c", script, host, strconv.Itoa(port), secs)
 	r := network.Result{Class: network.OK, Took: time.Since(start)}
 	if err == nil {
+		return r
+	}
+	if ctx.Err() == context.DeadlineExceeded || strings.Contains(err.Error(), "exit status 124") {
+		r.Class, r.Err = network.Timeout, fmt.Sprintf("timed out after %s", e.Timeout)
 		return r
 	}
 	msg := strings.ToLower(out)

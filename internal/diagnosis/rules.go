@@ -98,7 +98,7 @@ func (e *Env) rule(p *Probe) *Finding {
 			Fixes:      []Fix{{"Check the record", "dig +short " + p.Host}},
 		}
 
-	case p.Via != nil && network.IsLocal(p.Host):
+	case p.Via != nil && network.IsLocal(p.Host) && !p.TCP.OK() && p.TCP.Class != network.Unknown:
 		return &Finding{
 			Title: fmt.Sprintf("%s points to %s, but inside the %s container that is the container itself", "nginx", p.Addr(), p.Via.DisplayName()),
 			Detail: "nginx runs in Docker, so localhost/127.0.0.1 means the nginx container, not your machine " +
