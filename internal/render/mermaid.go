@@ -146,11 +146,17 @@ func mermaidCode(w io.Writer, r *diagnosis.MapReport, inv *diagnosis.Inventory) 
 				continue
 			}
 			st := diagnosis.Pass
-			if s.Cert != nil && s.Cert.Status != diagnosis.Pass {
-				st = s.Cert.Status
+			for _, step := range []*diagnosis.Step{s.Cert, s.TLS} {
+				if step != nil && step.Status != diagnosis.Pass && st != diagnosis.Fail {
+					st = step.Status
+				}
+			}
+			tlsLine := ""
+			if s.TLS != nil {
+				tlsLine = s.TLS.Detail
 			}
 			id, _ := g.node("site|"+s.Server.Pos, st)
-			g.add("    ", id, stadium, "nginx", s.Server.DisplayName(), "server · "+s.Server.ListenSummary()+published(r, s.Server))
+			g.add("    ", id, stadium, "nginx", s.Server.DisplayName(), "server · "+s.Server.ListenSummary()+published(r, s.Server), tlsLine)
 		}
 		g.lines = append(g.lines, "  end")
 		for _, s := range r.Servers {

@@ -21,6 +21,7 @@ type MapReport struct {
 type MapServer struct {
 	Server  *nginx.Server
 	Cert    *Step
+	TLS     *Step
 	Entries []*MapEntry
 }
 
@@ -92,6 +93,9 @@ func (e *Env) Map() (*MapReport, error) {
 				}
 			}
 			if f != nil {
+				r.Issues = append(r.Issues, f)
+			}
+			if f, ms.TLS = e.tlsCheck(s.DisplayName(), dialPortFor(cfg, e, port), s, up[port]); f != nil {
 				r.Issues = append(r.Issues, f)
 			}
 		}

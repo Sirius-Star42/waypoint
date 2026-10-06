@@ -121,6 +121,9 @@ func (p *Printer) sites(r *diagnosis.MapReport, inv *diagnosis.Inventory) {
 		if s.Cert != nil {
 			p.f("  %s %s", p.icon(s.Cert.Status), p.detail(s.Cert.Status, "certificate: "+s.Cert.Detail))
 		}
+		if s.TLS != nil {
+			p.f("  %s %s", p.icon(s.TLS.Status), p.detail(s.TLS.Status, s.TLS.Detail))
+		}
 		p.f("\n")
 		locW, tgtW := 0, 0
 		for _, e := range s.Entries {

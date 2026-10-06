@@ -13,6 +13,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 )
@@ -229,6 +230,47 @@ func CertInfo(ctx context.Context, host string, port int, sni string, timeout ti
 		return nil, fmt.Errorf("no certificate presented")
 	}
 	return describeCert(state.PeerCertificates, sni), nil
+}
+
+var tlsVersions = []struct {
+	ID   uint16
+	Name string
+}{{tls.VersionTLS10, "TLS 1.0"}, {tls.VersionTLS11, "TLS 1.1"}, {tls.VersionTLS12, "TLS 1.2"}, {tls.VersionTLS13, "TLS 1.3"}}
+
+// TLSVersions handshakes once per protocol version and returns the names of those the server
+// accepts, oldest first. Old versions are offered with every cipher Go knows, insecure ones
+// included, so a server that still allows them is caught.
+func TLSVersions(ctx context.Context, host string, port int, sni string, timeout time.Duration) []string {
+	var suites []uint16
+	for _, c := range append(tls.CipherSuites(), tls.InsecureCipherSuites()...) {
+		suites = append(suites, c.ID)
+	}
+	ok := make([]bool, len(tlsVersions))
+	var wg sync.WaitGroup
+	for i, v := range tlsVersions {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			d := &tls.Dialer{
+				NetDialer: &net.Dialer{Timeout: timeout},
+				Config:    &tls.Config{ServerName: sni, InsecureSkipVerify: true, MinVersion: v.ID, MaxVersion: v.ID, CipherSuites: suites},
+			}
+			ctx, cancel := context.WithTimeout(ctx, timeout)
+			defer cancel()
+			if conn, err := d.DialContext(ctx, "tcp", net.JoinHostPort(dialHost(host), strconv.Itoa(port))); err == nil {
+				conn.Close()
+				ok[i] = true
+			}
+		}()
+	}
+	wg.Wait()
+	var out []string
+	for i, v := range tlsVersions {
+		if ok[i] {
+			out = append(out, v.Name)
+		}
+	}
+	return out
 }
 
 func CertFile(path, name string) (*Cert, error) {

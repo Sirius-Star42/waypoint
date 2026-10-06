@@ -295,6 +295,7 @@ func (e *Env) traceNginx(cfg *nginx.Config, t Target) *Report {
 
 	var fs []*Finding
 	var resp *network.HTTPResult
+	var tlsIssue *Finding
 	if listener.OK() {
 		ht := Target{Scheme: "http", Host: t.Host, Port: dialPort, Path: t.Path}
 		if ssl {
@@ -317,6 +318,13 @@ func (e *Env) traceNginx(cfg *nginx.Config, t Target) *Report {
 				r.Steps = append(r.Steps, *st)
 				if f != nil {
 					fs = append(fs, f)
+				}
+			}
+			// Old TLS versions don't break this request, so they never become the root cause.
+			if f, st := e.tlsCheck(t.Host, dialPort, m.Server, true); st != nil {
+				r.Steps = append(r.Steps, *st)
+				if f != nil {
+					tlsIssue = f
 				}
 			}
 		}
@@ -352,6 +360,9 @@ func (e *Env) traceNginx(cfg *nginx.Config, t Target) *Report {
 	// A failing nginx -t matters for the next reload, not for whether this request works now.
 	if f := e.testFailure(cfg); f != nil && listener.OK() {
 		r.Others = append(r.Others, f)
+	}
+	if tlsIssue != nil {
+		r.Others = append(r.Others, tlsIssue)
 	}
 	if r.OK() {
 		r.Summary = t.Host + t.Path + " → nginx"
@@ -464,6 +475,87 @@ func (e *Env) certCheck(host string, port int, s *nginx.Server) (*Finding, *Step
 		return nil, &Step{Status: Warn, Text: "certificate", Detail: "could not read: " + err.Error(), Indent: 1}
 	}
 	return certFinding(cert, sni, s)
+}
+
+var legacyTLS = map[string]bool{"SSL 2.0": true, "SSL 3.0": true, "TLS 1.0": true, "TLS 1.1": true}
+
+// tlsCheck reports the TLS versions a server accepts: from real handshakes when nginx is
+// reachable, otherwise from its ssl_protocols.
+func (e *Env) tlsCheck(host string, port int, s *nginx.Server, live bool) (*Finding, *Step) {
+	var accepted []string
+	source := "accepted in a handshake"
+	if live {
+		sni := host
+		if network.IsLocal(host) {
+			sni = s.DisplayName()
+		}
+		accepted = network.TLSVersions(e.Ctx, "127.0.0.1", port, sni, e.Timeout)
+	}
+	if len(accepted) == 0 {
+		for _, p := range s.Protocols {
+			accepted = append(accepted, protocolName(p))
+		}
+		source = "enabled by ssl_protocols in " + shortPos(s.ProtocolsPos)
+	}
+	if len(accepted) == 0 {
+		return nil, nil
+	}
+	st := &Step{Status: Pass, Text: "TLS", Detail: versionList(accepted), Indent: 1}
+	var old []string
+	modern := false
+	for _, v := range accepted {
+		if legacyTLS[v] {
+			old = append(old, v)
+		}
+		modern = modern || v == "TLS 1.2" || v == "TLS 1.3"
+	}
+	fix := Fix{"Add this to the server block in " + shortPos(s.Pos) + ", then reload nginx", "ssl_protocols TLSv1.2 TLSv1.3;"}
+	if s.ProtocolsPos != "" {
+		fix.Text = "Change ssl_protocols in " + shortPos(s.ProtocolsPos) + " to this, then reload nginx"
+	}
+	name := s.DisplayName()
+	switch {
+	case !modern:
+		st.Status = Fail
+		return &Finding{
+			Title:      fmt.Sprintf("%s only offers %s, which browsers refuse", name, strings.Join(accepted, ", ")),
+			Detail:     "Current browsers and clients need TLS 1.2 or 1.3; they can't connect to this site.",
+			Confidence: 0.85,
+			Evidence:   []Evidence{fail("%s %s", strings.Join(accepted, ", "), source)},
+			Fixes:      []Fix{fix},
+		}, st
+	case len(old) > 0:
+		st.Status = Warn
+		return &Finding{
+			Title:      fmt.Sprintf("%s still accepts %s, deprecated since 2021", name, strings.Join(old, " and ")),
+			Detail:     "These versions have known weaknesses (RFC 8996). Browsers dropped them in 2020 and PCI DSS no longer allows them.",
+			Confidence: 0.5,
+			Evidence:   []Evidence{warn("%s %s", strings.Join(old, ", "), source)},
+			Fixes:      []Fix{fix},
+		}, st
+	}
+	return nil, st
+}
+
+// versionList shortens "TLS 1.0, TLS 1.1, TLS 1.2" to "TLS 1.0, 1.1, 1.2".
+func versionList(vs []string) string {
+	out := strings.Join(vs, ", ")
+	if len(vs) > 1 {
+		out = vs[0] + ", " + strings.ReplaceAll(strings.Join(vs[1:], ", "), "TLS ", "")
+	}
+	return out
+}
+
+func protocolName(p string) string {
+	switch p {
+	case "SSLv2":
+		return "SSL 2.0"
+	case "SSLv3":
+		return "SSL 3.0"
+	case "TLSv1":
+		return "TLS 1.0"
+	}
+	return strings.Replace(p, "TLSv", "TLS ", 1)
 }
 
 func certFinding(cert *network.Cert, name string, s *nginx.Server) (*Finding, *Step) {

@@ -167,3 +167,23 @@ func TestConflictIsPerPort(t *testing.T) {
 		t.Errorf("want conflicts 80 (2nd), 80 and 443 (3rd), got ports %v", ports)
 	}
 }
+
+func TestSSLProtocols(t *testing.T) {
+	src := `http {
+  ssl_protocols TLSv1 TLSv1.1 TLSv1.2;
+  server { listen 443 ssl; server_name a.com; }
+  server { listen 443 ssl; server_name b.com; ssl_protocols TLSv1.2 TLSv1.3; }
+}`
+	dirs, _, _, err := Parse(dumpFS{"/n.conf": src}, "/n.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := Build(dirs)
+	a, b := cfg.Servers[0], cfg.Servers[1]
+	if strings.Join(a.Protocols, " ") != "TLSv1 TLSv1.1 TLSv1.2" || a.ProtocolsPos != "/n.conf:2" {
+		t.Errorf("a.com inherits http's ssl_protocols: %v at %s", a.Protocols, a.ProtocolsPos)
+	}
+	if strings.Join(b.Protocols, " ") != "TLSv1.2 TLSv1.3" {
+		t.Errorf("b.com sets its own: %v", b.Protocols)
+	}
+}

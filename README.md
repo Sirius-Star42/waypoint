@@ -210,6 +210,7 @@ can see processes of every user. Without nginx, `waypoint` still lists and check
 - a `server_name` defined twice on a port (nginx silently ignores the second one)
 - a config that fails `nginx -t`, meaning nginx won't come back after a reload or reboot
 - expired, soon-to-expire or wrong-name TLS certificates
+- TLS versions each site really accepts, flagging deprecated TLS 1.0/1.1 (RFC 8996) with the `ssl_protocols` line to change
 - nginx in Docker pointing at `localhost`, or at a container on another network
 
 **every app on the machine**
