@@ -7,16 +7,30 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"regexp"
 	"strings"
 
 	"github.com/Sirius-Star42/waypoint/internal/collector/network"
 	"github.com/Sirius-Star42/waypoint/internal/diagnosis"
 )
 
+type shape struct{ open, close string }
+
+var (
+	box      = shape{"[", "]"}
+	rounded  = shape{"(", ")"}
+	stadium  = shape{"([", "])"}
+	cylinder = shape{"[(", ")]"}
+	folder   = shape{"[/", "/]"}
+	hexagon  = shape{"{{", "}}"}
+)
+
 type graph struct {
 	ids     map[string]string
+	status  map[string]diagnosis.Status
 	lines   []string
 	edges   []string
+	styles  []string
 	classes []string
 }
 
@@ -26,18 +40,61 @@ func (g *graph) node(key string, st diagnosis.Status) (string, bool) {
 	}
 	id := fmt.Sprintf("n%d", len(g.ids))
 	g.ids[key] = id
+	g.status[id] = st
 	g.classes = append(g.classes, fmt.Sprintf("  class %s %s", id, class(st)))
 	return id, true
 }
 
-func (g *graph) add(indent, id, label string) {
-	g.lines = append(g.lines, fmt.Sprintf("%s%s[\"%s\"]", indent, id, esc(label)))
+// add defines a node: a bold title over smaller detail lines, with ✗ or ! when it needs attention.
+func (g *graph) add(indent, id string, sh shape, title string, details ...string) {
+	switch g.status[id] {
+	case diagnosis.Fail:
+		title = "✗ " + title
+	case diagnosis.Warn:
+		title = "! " + title
+	}
+	label := "<b>" + esc(title) + "</b>"
+	for _, d := range details {
+		if d != "" {
+			label += "<br/><small>" + esc(d) + "</small>"
+		}
+	}
+	g.lines = append(g.lines, fmt.Sprintf("%s%s%s\"%s\"%s", indent, id, sh.open, label, sh.close))
+}
+
+// edge connects two nodes and colors the line by the health of the node it leads to.
+func (g *graph) edge(from, to, label string, dotted bool) {
+	var e string
+	switch {
+	case dotted && label != "":
+		e = fmt.Sprintf("  %s -. \"%s\" .-> %s", from, esc(label), to)
+	case dotted:
+		e = fmt.Sprintf("  %s -.-> %s", from, to)
+	case label != "":
+		e = fmt.Sprintf("  %s -- \"%s\" --> %s", from, esc(label), to)
+	default:
+		e = fmt.Sprintf("  %s --> %s", from, to)
+	}
+	if contains(g.edges, e) {
+		return
+	}
+	switch g.status[to] {
+	case diagnosis.Fail:
+		g.styles = append(g.styles, fmt.Sprintf("  linkStyle %d stroke:#cf222e,stroke-width:2px", len(g.edges)))
+	case diagnosis.Warn:
+		g.styles = append(g.styles, fmt.Sprintf("  linkStyle %d stroke:#bf8700,stroke-width:2px", len(g.edges)))
+	}
+	g.edges = append(g.edges, e)
 }
 
 // mermaidCode draws visitors → nginx sites → apps (grouped by how they run) → dependencies.
 func mermaidCode(w io.Writer, r *diagnosis.MapReport, inv *diagnosis.Inventory) {
-	g := &graph{ids: map[string]string{}}
+	g := &graph{ids: map[string]string{}, status: map[string]diagnosis.Status{}}
 	used := map[*diagnosis.App]bool{}
+	nginxContainer := ""
+	if r != nil {
+		nginxContainer = r.Config.Container
+	}
 
 	target := func(pr *diagnosis.Probe) string {
 		a, svc := inv.AppOf(pr)
@@ -48,17 +105,17 @@ func mermaidCode(w io.Writer, r *diagnosis.MapReport, inv *diagnosis.Inventory) 
 			}
 			id, isNew := g.node("ep|"+pr.Addr(), st)
 			if isNew {
-				label := pr.Addr()
+				sh, detail := box, ""
 				switch {
 				case pr.Unix == "" && !network.IsLocal(pr.Host) && pr.Via == nil:
-					label += "<br/>another machine"
+					sh, detail = hexagon, "another machine"
 					if !pr.Up() {
-						label += " · unreachable"
+						detail += " · unreachable"
 					}
 				case !pr.Up():
-					label += "<br/>nothing running"
+					detail = "nothing running"
 				}
-				g.add("  ", id, label)
+				g.add("  ", id, sh, pr.Addr(), detail)
 			}
 			return id
 		}
@@ -71,8 +128,34 @@ func mermaidCode(w io.Writer, r *diagnosis.MapReport, inv *diagnosis.Inventory) 
 		return id
 	}
 
+	// localhost inside a container is the container itself, so it gets its own node
+	// instead of being merged with the host's localhost.
+	dep := func(from string, pr *diagnosis.Probe, d *diagnosis.Dep) {
+		if d.Probe == nil {
+			return
+		}
+		if network.IsLocal(d.Name) && pr.Container != nil {
+			st, detail := diagnosis.Warn, "inside the "+pr.Container.DisplayName()+" container"
+			if !d.Probe.TCP.OK() {
+				st, detail = diagnosis.Fail, detail+" · nothing listening"
+			}
+			id, isNew := g.node("ep|"+pr.Container.Name+"|"+d.Probe.Addr(), st)
+			if isNew {
+				g.add("  ", id, box, d.Probe.Addr(), detail)
+			}
+			g.edge(from, id, d.EnvKey, true)
+			return
+		}
+		g.edge(from, target(d.Probe), d.EnvKey, true)
+	}
+
 	if r != nil {
-		g.lines = append(g.lines, "  visitors((visitors))", "  subgraph nginx[\"nginx\"]")
+		g.lines = append(g.lines, `  visitors(("<b>visitors</b>"))`)
+		title := "nginx"
+		if nginxContainer != "" {
+			title += " · docker: " + nginxContainer
+		}
+		g.lines = append(g.lines, fmt.Sprintf("  subgraph nginx[\"%s\"]", esc(title)))
 		for _, s := range r.Servers {
 			if s.Server.Ignored() {
 				continue
@@ -82,10 +165,14 @@ func mermaidCode(w io.Writer, r *diagnosis.MapReport, inv *diagnosis.Inventory) 
 				st = s.Cert.Status
 			}
 			id, _ := g.node("site|"+s.Server.Pos, st)
-			g.add("    ", id, s.Server.DisplayName()+"<br/>"+s.Server.ListenSummary())
-			g.edges = append(g.edges, "  visitors --> "+id)
+			g.add("    ", id, stadium, s.Server.DisplayName(), s.Server.ListenSummary()+published(r, s.Server))
 		}
 		g.lines = append(g.lines, "  end")
+		for _, s := range r.Servers {
+			if !s.Server.Ignored() {
+				g.edge("visitors", g.ids["site|"+s.Server.Pos], "", false)
+			}
+		}
 		for _, s := range r.Servers {
 			if s.Server.Ignored() {
 				continue
@@ -94,28 +181,25 @@ func mermaidCode(w io.Writer, r *diagnosis.MapReport, inv *diagnosis.Inventory) 
 			for _, e := range s.Entries {
 				path := locText(e)
 				if len(e.Probes) == 0 {
-					label := e.Target
+					label, sh, detail := e.Target, box, ""
 					if e.Location != nil && e.Location.Root != "" {
-						label = "files " + e.Location.Root
+						label, sh, detail = e.Location.Root, folder, "static files"
+						if e.Status == diagnosis.Fail {
+							detail = "directory missing"
+						}
 					}
 					tid, isNew := g.node("ep|"+label, e.Status)
 					if isNew {
-						g.add("  ", tid, label)
+						g.add("  ", tid, sh, label, detail)
 					}
-					g.edges = append(g.edges, fmt.Sprintf("  %s -- \"%s\" --> %s", sid, esc(path), tid))
+					g.edge(sid, tid, path, false)
 					continue
 				}
 				for _, pr := range e.Probes {
 					tid := target(pr)
-					g.edges = append(g.edges, fmt.Sprintf("  %s -- \"%s\" --> %s", sid, esc(path), tid))
+					g.edge(sid, tid, path, false)
 					for _, d := range pr.Deps {
-						if d.Probe == nil {
-							continue
-						}
-						edge := fmt.Sprintf("  %s -.-> %s", tid, target(d.Probe))
-						if !contains(g.edges, edge) {
-							g.edges = append(g.edges, edge)
-						}
+						dep(tid, pr, d)
 					}
 				}
 			}
@@ -131,35 +215,50 @@ func mermaidCode(w io.Writer, r *diagnosis.MapReport, inv *diagnosis.Inventory) 
 			case r != nil && !used[a]:
 				unrouted = append(unrouted, a)
 			default:
-				appGraph(g, a, "  ")
+				appGraph(g, a, "  ", nginxContainer)
 			}
 		}
 		if len(unrouted) > 0 {
-			g.lines = append(g.lines, "  subgraph unrouted[\"not behind nginx\"]")
+			g.lines = append(g.lines, `  subgraph unrouted["not behind nginx"]`)
 			for _, a := range unrouted {
-				appGraph(g, a, "    ")
+				appGraph(g, a, "    ", nginxContainer)
 			}
 			g.lines = append(g.lines, "  end")
+			g.styles = append(g.styles, "  style unrouted fill:none,stroke:#8c959f,stroke-dasharray:4 3")
 		}
 		// Stopped projects nothing routes to are one node each; their services add nothing to the map.
 		if len(stopped) > 0 {
-			g.lines = append(g.lines, "  subgraph stopped[\"stopped\"]")
+			g.lines = append(g.lines, `  subgraph stopped["stopped"]`)
 			for _, a := range stopped {
 				id, _ := g.node("app|"+a.Name, diagnosis.Info)
-				g.add("    ", id, a.Name+"<br/>"+a.Kind+" · "+plural(len(a.Services), "service")+"<br/>"+a.State)
+				g.add("    ", id, rounded, a.Name, a.Kind+" · "+plural(len(a.Services), "service"), a.State)
 			}
 			g.lines = append(g.lines, "  end")
+			g.styles = append(g.styles, "  style stopped fill:none,stroke:#8c959f,stroke-dasharray:4 3")
 		}
 	}
+	if r != nil {
+		g.styles = append(g.styles, "  style nginx fill:#ddf4ff,stroke:#0969da,color:#0a3069")
+	}
 
+	fmt.Fprintln(w, `%%{init: {"flowchart": {"curve": "basis"}}}%%`)
 	fmt.Fprintln(w, "flowchart LR")
-	for _, l := range append(append(g.lines, g.edges...), g.classes...) {
+	for _, l := range g.lines {
 		fmt.Fprintln(w, l)
 	}
-	fmt.Fprintln(w, "  classDef ok stroke:#2da44e,stroke-width:2px")
-	fmt.Fprintln(w, "  classDef bad stroke:#cf222e,stroke-width:2px,color:#cf222e")
-	fmt.Fprintln(w, "  classDef warn stroke:#bf8700,stroke-width:2px")
-	fmt.Fprintln(w, "  classDef info stroke:#8c959f")
+	for _, l := range g.edges {
+		fmt.Fprintln(w, l)
+	}
+	for _, l := range g.classes {
+		fmt.Fprintln(w, l)
+	}
+	for _, l := range g.styles {
+		fmt.Fprintln(w, l)
+	}
+	fmt.Fprintln(w, "  classDef ok fill:#dafbe1,stroke:#2da44e,color:#0d3a1a")
+	fmt.Fprintln(w, "  classDef bad fill:#ffebe9,stroke:#cf222e,stroke-width:2px,color:#82071e")
+	fmt.Fprintln(w, "  classDef warn fill:#fff8c5,stroke:#bf8700,color:#4d2d00")
+	fmt.Fprintln(w, "  classDef info fill:#f6f8fa,stroke:#8c959f,color:#57606a,stroke-dasharray:4 3")
 }
 
 // Mermaid prints the diagram as a fenced block, ready to paste into a README.
@@ -182,24 +281,50 @@ func MermaidLink(r *diagnosis.MapReport, inv *diagnosis.Inventory) string {
 	return "https://mermaid.live/edit#pako:" + base64.RawURLEncoding.EncodeToString(buf.Bytes())
 }
 
-func appGraph(g *graph, a *diagnosis.App, indent string) {
+func appGraph(g *graph, a *diagnosis.App, indent, nginxContainer string) {
 	if a.Kind == "docker compose" {
-		g.lines = append(g.lines, fmt.Sprintf("%ssubgraph %s[\"%s\"]", indent, safeID("compose_"+a.Name), esc(a.Name+" · docker compose")))
+		sg := safeID("compose_" + a.Name)
+		g.lines = append(g.lines, fmt.Sprintf("%ssubgraph %s[\"%s\"]", indent, sg, esc(a.Name+" · docker compose")))
 		for _, s := range a.Services {
+			// nginx itself is already drawn as the nginx box.
+			if nginxContainer != "" && s.Container != nil && s.Container.Name == nginxContainer {
+				continue
+			}
+			image := ""
+			if s.Container != nil {
+				image = s.Container.Image
+			}
 			id, _ := g.node("svc|"+a.Name+"|"+s.Name, s.Status)
-			g.add(indent+"  ", id, s.Name+portsLine(s.Ports)+"<br/>"+s.State)
+			g.add(indent+"  ", id, serviceShape(s.Name, image), s.Name+portsLine(s.Ports), s.State)
 		}
 		g.lines = append(g.lines, indent+"end")
+		g.styles = append(g.styles, fmt.Sprintf("  style %s fill:none,stroke:#8c959f", sg))
 		return
 	}
 	id, _ := g.node("app|"+a.Name, a.Status)
-	label := a.Name + portsLine(a.Ports) + "<br/>" + a.Kind
+	details := []string{a.Kind}
+	image := ""
 	for _, f := range a.Facts {
-		if f.Label == "folder" || f.Label == "image" {
-			label += "<br/>" + f.Value
+		switch f.Label {
+		case "folder":
+			details = append(details, tildePath(f.Value))
+		case "image":
+			details = append(details, f.Value)
+			image = f.Value
 		}
 	}
-	g.add(indent, id, label+"<br/>"+a.State)
+	details = append(details, a.State)
+	g.add(indent, id, serviceShape(a.Name, image), a.Name+portsLine(a.Ports), details...)
+}
+
+var datastore = regexp.MustCompile(`(?i)(^|[^a-z])(postgres|postgresql|mysql|mariadb|redis|valkey|mongo|mongodb|memcached|elasticsearch|opensearch|clickhouse|db|database)([^a-z]|$)`)
+
+// serviceShape draws databases and caches as cylinders.
+func serviceShape(name, image string) shape {
+	if datastore.MatchString(name) || datastore.MatchString(image) {
+		return cylinder
+	}
+	return rounded
 }
 
 func portsLine(ports []diagnosis.AppPort) string {
@@ -249,10 +374,5 @@ func class(s diagnosis.Status) string {
 }
 
 func esc(s string) string {
-	parts := strings.Split(s, "<br/>")
-	r := strings.NewReplacer(`"`, "#quot;", "<", "#lt;", ">", "#gt;")
-	for i := range parts {
-		parts[i] = r.Replace(parts[i])
-	}
-	return strings.Join(parts, "<br/>")
+	return strings.NewReplacer(`"`, "#quot;", "<", "#lt;", ">", "#gt;").Replace(s)
 }

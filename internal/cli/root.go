@@ -43,7 +43,12 @@ checks every hop against what is actually running, and explains what is broken.
   waypoint https://x.dev/api    trace one URL, including the nginx location
   waypoint map --open           the route map as a diagram in your browser
   waypoint map --mermaid        the route map as Mermaid, to paste into a README`,
-		Args:          cobra.MaximumNArgs(1),
+		Args: func(cmd *cobra.Command, args []string) error {
+			if len(args) > 1 {
+				return fmt.Errorf("give one target at a time, e.g. waypoint 8080 or waypoint %s", args[0])
+			}
+			return nil
+		},
 		Version:       version,
 		SilenceUsage:  true,
 		SilenceErrors: true,
@@ -117,6 +122,8 @@ func (o *options) routeMap(ctx context.Context, w io.Writer) error {
 	}
 	if o.mermaid {
 		render.Mermaid(w, r, inv)
+		// stderr, so `waypoint map --mermaid > map.md` stays a clean diagram.
+		fmt.Fprintf(os.Stderr, "\nView it in your browser (the diagram travels inside the link, nothing is uploaded):\n%s\n", render.MermaidLink(r, inv))
 		return nil
 	}
 	issues := merge(r, inv)
