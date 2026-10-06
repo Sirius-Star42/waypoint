@@ -31,6 +31,7 @@ type Container struct {
 	Service      string              // compose service
 	ComposeFiles []string
 	WorkingDir   string
+	DependsOn    []string // compose services this one depends on
 }
 
 type Binding struct {
@@ -137,6 +138,12 @@ func Parse(out string) (*Snapshot, error) {
 			Project:      in.Config.Labels["com.docker.compose.project"],
 			Service:      in.Config.Labels["com.docker.compose.service"],
 			WorkingDir:   in.Config.Labels["com.docker.compose.project.working_dir"],
+		}
+		// "redis:service_started:false,postgres:service_healthy:true"
+		for _, d := range strings.Split(in.Config.Labels["com.docker.compose.depends_on"], ",") {
+			if name, _, _ := strings.Cut(d, ":"); name != "" {
+				c.DependsOn = append(c.DependsOn, name)
+			}
 		}
 		if f := in.Config.Labels["com.docker.compose.project.config_files"]; f != "" {
 			c.ComposeFiles = strings.Split(f, ",")

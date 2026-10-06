@@ -101,3 +101,30 @@ func TestPortCandidates(t *testing.T) {
 		t.Errorf("fix = %+v", f.Fixes[0])
 	}
 }
+
+func TestContainerLinks(t *testing.T) {
+	api := &docker.Container{Name: "shop-api-1", Project: "shop", Service: "api", Image: "python:3.12", DependsOn: []string{"db", "cache"},
+		Env: map[string]string{
+			"DATABASE_URL":        "postgres://app@localhost:5432/app",
+			"CACHE_URL":           "redis://cache:6379",
+			"NEXT_PUBLIC_API_URL": "http://localhost:8000",
+			"SELF_URL":            "http://api:8080",
+		}}
+	db := &docker.Container{Name: "shop-db-1", Project: "shop", Service: "db", Image: "postgres:16", Env: map[string]string{"API_URL": "http://api:8080"}}
+	cache := &docker.Container{Name: "shop-cache-1", Project: "shop", Service: "cache", Image: "redis:7"}
+	snap := &docker.Snapshot{Containers: []*docker.Container{api, db, cache}}
+
+	got := containerLinks(api, snap)
+	want := []Link{{Service: "cache", Via: "CACHE_URL"}, {Addr: "localhost:5432", Via: "DATABASE_URL"}, {Service: "db", Via: "depends_on"}}
+	if len(got) != len(want) {
+		t.Fatalf("links = %+v", got)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("link %d = %+v, want %+v", i, got[i], want[i])
+		}
+	}
+	if l := containerLinks(db, snap); len(l) != 0 {
+		t.Errorf("a database sharing the app's env file doesn't call the app: %+v", l)
+	}
+}

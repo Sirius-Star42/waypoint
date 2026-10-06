@@ -97,7 +97,7 @@ server's README or wiki:
 
 ```mermaid
 flowchart LR
-  visitors((visitors))
+  clients((clients))
   subgraph nginx["nginx"]
     n0["admin.example.com<br/>:80"]
     n1["api.example.com<br/>:80"]
@@ -111,9 +111,9 @@ flowchart LR
     n7["worker<br/>systemd service<br/>/opt/worker<br/>failed, exit-code 1"]
     n8["old-api :9101<br/>process<br/>/home/deploy/old-api<br/>running for a few seconds"]
   end
-  visitors --> n0
-  visitors --> n1
-  visitors --> n2
+  clients --> n0
+  clients --> n1
+  clients --> n2
   n0 -- "/" --> n3
   n1 -- "/" --> n4
   n2 -- "/" --> n5

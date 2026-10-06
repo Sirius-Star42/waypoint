@@ -52,7 +52,7 @@ func TestMermaidCollapsesStoppedProjects(t *testing.T) {
 	var buf bytes.Buffer
 	Mermaid(&buf, nil, inv)
 	out := buf.String()
-	if !strings.Contains(out, `n0("<b>shop</b><br/><small>docker compose · 2 services</small><br/><small>stopped 2 days ago</small>")`) || strings.Contains(out, "api") {
+	if !strings.Contains(out, `<b>shop</b><br/><small style='color:#64748b'>compose project · 2 services</small><br/><small style='color:#64748b'>stopped 2 days ago</small>"]`) || strings.Contains(out, "api") {
 		t.Errorf("a stopped project should be a single node:\n%s", out)
 	}
 }

@@ -42,6 +42,16 @@ const (
 	bold   = "1"
 )
 
+// Hyperlink shows a long URL as a short clickable link (OSC 8) in terminals that support it,
+// and as the full URL anywhere else, e.g. when piped or in Apple Terminal.
+func Hyperlink(w io.Writer, url string) string {
+	if !colorEnabled(w) || os.Getenv("TERM_PROGRAM") == "Apple_Terminal" || len(url) <= 60 {
+		return url
+	}
+	text := url[:48] + "…"
+	return "\x1b]8;;" + url + "\x1b\\" + text + "\x1b]8;;\x1b\\"
+}
+
 func (p *Printer) c(code, s string) string {
 	if !p.Color || s == "" {
 		return s
@@ -225,6 +235,9 @@ func (p *Printer) apps(inv *diagnosis.Inventory, haveNginx bool) {
 				p.fact(f.Label, truncate(f.Value, 110))
 			}
 		}
+		if a.Usage != nil {
+			p.fact("usage", a.Usage.String())
+		}
 		p.ports(a.Ports)
 		p.services(a.Services)
 		for _, f := range a.Facts {
@@ -384,18 +397,43 @@ func (p *Printer) services(svcs []*diagnosis.AppService) {
 	for _, s := range svcs {
 		var ports []string
 		var routes []string
+		public := false
 		for _, port := range s.Ports {
 			if port.Port != 0 {
 				ports = append(ports, fmt.Sprintf(":%d", port.Port))
+				public = public || !port.Local
 			}
 			routes = append(routes, port.Routes...)
 		}
-		line := fmt.Sprintf("    %s %s  %s  %s", p.icon(s.Status), pad(s.Name, w), pad(strings.Join(ports, " "), 6), p.detail(stateStatus(s.Status), s.State))
+		state := p.detail(stateStatus(s.Status), s.State)
+		switch {
+		case public:
+			state = p.c(yellow, "public") + "  " + state
+		case len(ports) > 0:
+			state = p.c(dim, "local ") + "  " + state
+		case anyPorts(svcs):
+			state = "        " + state
+		}
+		if s.Usage != nil {
+			state += p.c(dim, "  · "+s.Usage.String())
+		}
+		line := fmt.Sprintf("    %s %s  %s  %s", p.icon(s.Status), pad(s.Name, w), pad(strings.Join(ports, " "), 6), state)
 		if len(routes) > 0 {
 			line += "  " + p.c(dim, "← ") + strings.Join(dedupe(routes), ", ")
 		}
 		p.f("%s\n", line)
 	}
+}
+
+func anyPorts(svcs []*diagnosis.AppService) bool {
+	for _, s := range svcs {
+		for _, p := range s.Ports {
+			if p.Port != 0 {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func (p *Printer) portText(port diagnosis.AppPort, haveNginx bool) string {
