@@ -229,7 +229,7 @@ func (p *Printer) apps(inv *diagnosis.Inventory, haveNginx bool) {
 		p.services(a.Services)
 		for _, f := range a.Facts {
 			if f.Label == "manage" {
-				p.fact("manage", p.c(green, f.Value))
+				p.fact("manage", p.c(green, tildeCmd(f.Value)))
 			}
 		}
 		for _, n := range a.Notes {
@@ -320,6 +320,15 @@ func orUnknown(s string) string {
 		return "unknown"
 	}
 	return s
+}
+
+// tildeCmd shortens home paths inside a command; the shell expands ~ back.
+func tildeCmd(cmd string) string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" || home == "/" {
+		return cmd
+	}
+	return strings.ReplaceAll(cmd, " "+home+"/", " ~/")
 }
 
 // tildePath shortens paths under the user's home directory to ~/...
@@ -517,21 +526,31 @@ func (p *Printer) Diagnose(r *diagnosis.Report) {
 		for _, s := range r.Steps {
 			text := pad(strings.Repeat("  ", s.Indent)+s.Text, w)
 			line := fmt.Sprintf("  %s %s  %s", p.icon(s.Status), text, p.detail(s.Status, s.Detail))
-			if s.Pos != "" {
+			if s.Pos != "" && s.Detail == "" {
+				line += p.c(dim, s.Pos)
+			} else if s.Pos != "" {
 				line += "  " + p.c(dim, s.Pos)
 			}
 			p.f("%s\n", strings.TrimRight(line, " "))
 		}
 	}
-	if r.Root == nil {
-		return
+	if r.Root != nil {
+		p.f("\n")
+		p.findingBody(r.Root, "  ")
 	}
-	p.f("\n")
-	p.findingBody(r.Root, "  ")
 	if len(r.Others) > 0 {
 		p.f("\n  %s\n", p.c(bold, "Also"))
 		for _, f := range r.Others {
 			p.f("    %s %s\n", p.icon(diagnosis.Warn), f.Title)
+			// Without a root cause the reader has nothing else to act on, so show how to follow up.
+			if r.Root == nil {
+				for _, fix := range f.Fixes {
+					if fix.Command != "" {
+						p.f("      %s\n", p.c(green, "$ "+fix.Command))
+						break
+					}
+				}
+			}
 		}
 	}
 }
@@ -564,7 +583,7 @@ func (p *Printer) findingBody(f *diagnosis.Finding, in string) {
 		for _, fix := range f.Fixes {
 			p.f("%s  %s\n", in, fix.Text)
 			if fix.Command != "" {
-				p.f("%s    %s\n", in, p.c(green, "$ "+fix.Command))
+				p.f("%s    %s\n", in, p.c(green, "$ "+tildeCmd(fix.Command)))
 			}
 		}
 	}

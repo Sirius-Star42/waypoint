@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/Sirius-Star42/waypoint/internal/collector/docker"
+	"github.com/Sirius-Star42/waypoint/internal/collector/network"
 	"github.com/Sirius-Star42/waypoint/internal/collector/process"
 )
 
@@ -74,5 +75,29 @@ func TestHint(t *testing.T) {
 	inv.Hint([]*Finding{f})
 	if len(f.Evidence) != 1 || !strings.Contains(f.Evidence[0].Text, "old-api :9001") || strings.Contains(f.Evidence[0].Text, "redis") {
 		t.Errorf("evidence = %+v", f.Evidence)
+	}
+}
+
+func TestDepStepsLocalhostInContainer(t *testing.T) {
+	p := &Probe{Container: &docker.Container{Name: "shop-api-1", Service: "api", Status: "restarting"}, Deps: []*Dep{
+		{Name: "localhost", EnvKey: "DATABASE_URL", Probe: &Probe{Host: "localhost", Port: 5432, TCP: network.Result{Class: network.Unknown}}},
+	}}
+	steps := depSteps(p)
+	if len(steps) != 1 || steps[0].Status != Fail || !strings.Contains(steps[0].Detail, "api container itself") {
+		t.Errorf("steps = %+v", steps)
+	}
+}
+
+func TestPortCandidates(t *testing.T) {
+	now := time.Now()
+	f := portCandidates(3000, []*docker.Container{
+		{Name: "grafana", Status: "exited", Finished: now.Add(-180 * 24 * time.Hour)},
+		{Name: "shop-web-1", Project: "shop", Service: "web", WorkingDir: "/srv/shop", Status: "exited", Finished: now.Add(-2 * time.Hour)},
+	})
+	if !strings.Contains(f.Title, "2 stopped containers") || !strings.HasPrefix(f.Evidence[0].Text, "shop · web") {
+		t.Errorf("finding = %+v", f)
+	}
+	if f.Fixes[0].Command != "cd /srv/shop && docker compose up -d web" {
+		t.Errorf("fix = %+v", f.Fixes[0])
 	}
 }

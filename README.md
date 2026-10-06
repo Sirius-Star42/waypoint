@@ -142,10 +142,10 @@ $ waypoint localhost:8088/api/
   ✓ nginx (docker: nginx) listening on :8088
   ✗   HTTP http://localhost:8088/api/         timed out after 3s
   ✓ server localhost                          exact name  conf.d/default.conf:1
-  ✓   location /api/                            conf.d/default.conf:9
+  ✓   location /api/                          conf.d/default.conf:9
   ✗     proxy_pass http://api:8080/
   ✗       api:8080 (from nginx)               docker: api · restarting (7 restarts) · nc: bad address 'api'
-  !         localhost:5432 (from api)         not checked, api is not running · via DATABASE_URL
+  ✗         localhost:5432 (from api)         localhost here is the api container itself · via DATABASE_URL
   ✓         redis:6379                        docker: redis · via REDIS_URL
   ✓         postgres:5432                     docker: postgres
 
@@ -160,10 +160,10 @@ $ waypoint localhost:8088/api/
     │ FATAL: could not connect to database at localhost:5432: [Errno 111] Connection refused  (×7)
 
   Fix
-    Use the service name instead of localhost (password hidden)
+    In compose.yaml, use the service name instead of localhost (password hidden)
       $ DATABASE_URL=postgres://app:***@postgres:5432/app
     Then recreate the container
-      $ docker compose up -d api
+      $ cd ~/shop && docker compose up -d api
 ```
 
 You can reproduce this with [examples/broken-compose](examples/broken-compose).

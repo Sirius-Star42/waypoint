@@ -209,18 +209,37 @@ func tcpPort(spec string) (int, bool) {
 	return n, err == nil
 }
 
+// ByHostPort finds the container publishing port: a running one if any, else the one that stopped last.
 func (s *Snapshot) ByHostPort(port int) (*Container, Binding) {
-	if s == nil {
-		return nil, Binding{}
-	}
-	for _, c := range s.Containers {
-		for _, b := range c.Bindings {
-			if b.HostPort == port {
-				return c, b
+	var best *Container
+	var bb Binding
+	for _, c := range s.AllByHostPort(port) {
+		if best == nil || c.Running() && !best.Running() || c.Running() == best.Running() && c.Finished.After(best.Finished) {
+			best = c
+			for _, b := range c.Bindings {
+				if b.HostPort == port {
+					bb = b
+				}
 			}
 		}
 	}
-	return nil, Binding{}
+	return best, bb
+}
+
+func (s *Snapshot) AllByHostPort(port int) []*Container {
+	if s == nil {
+		return nil
+	}
+	var out []*Container
+	for _, c := range s.Containers {
+		for _, b := range c.Bindings {
+			if b.HostPort == port {
+				out = append(out, c)
+				break
+			}
+		}
+	}
+	return out
 }
 
 func (s *Snapshot) ByID(id string) *Container {

@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"testing"
+	"time"
 
 	"github.com/Sirius-Star42/waypoint/internal/runner"
 )
@@ -73,5 +74,21 @@ func TestStoppedContainerKeepsBindings(t *testing.T) {
 	c, b := load(t).ByHostPort(9000)
 	if c == nil || c.Name != "old-worker" || b.ContainerPort != 9000 {
 		t.Fatalf("got %+v %+v", c, b)
+	}
+}
+
+func TestByHostPortPrefersRunningThenLatest(t *testing.T) {
+	now := time.Now()
+	bind := []Binding{{HostPort: 3000, ContainerPort: 3000}}
+	s := &Snapshot{Containers: []*Container{
+		{Name: "old", Status: "exited", Finished: now.Add(-90 * 24 * time.Hour), Bindings: bind},
+		{Name: "recent", Status: "exited", Finished: now.Add(-time.Hour), Bindings: bind},
+	}}
+	if c, _ := s.ByHostPort(3000); c == nil || c.Name != "recent" {
+		t.Errorf("stopped: got %v, want the one that stopped last", c)
+	}
+	s.Containers = append(s.Containers, &Container{Name: "live", Status: "running", Bindings: bind})
+	if c, _ := s.ByHostPort(3000); c == nil || c.Name != "live" {
+		t.Errorf("got %v, want the running one", c)
 	}
 }

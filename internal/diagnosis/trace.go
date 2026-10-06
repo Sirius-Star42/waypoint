@@ -4,6 +4,8 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 
@@ -31,12 +33,46 @@ type Report struct {
 func (r *Report) OK() bool { return r.Root == nil }
 
 func (e *Env) Diagnose(t Target) *Report {
-	if cfg, _ := e.Nginx(); cfg != nil {
+	cfg, _ := e.Nginx()
+	if cfg != nil {
 		if r := e.traceNginx(cfg, t); r != nil {
 			return r
 		}
 	}
-	return e.direct(t)
+	r := e.direct(t)
+	if cfg != nil && r.Root != nil && !t.PortGiven {
+		r.Root.Fixes = append(e.otherNginxPorts(cfg, t), r.Root.Fixes...)
+	}
+	return r
+}
+
+func pathArg(p string) string {
+	if p == "/" {
+		return ""
+	}
+	return p
+}
+
+// otherNginxPorts points at the ports nginx really serves this name on, e.g. a container published on :8088.
+func (e *Env) otherNginxPorts(cfg *nginx.Config, t Target) []Fix {
+	var out []Fix
+	seen := map[int]bool{t.Port: true}
+	for _, s := range cfg.Servers {
+		if !slices.Contains(s.Names, hostForMatch(t.Host)) {
+			continue
+		}
+		for _, l := range s.Listens {
+			if l.Unix != "" {
+				continue
+			}
+			port := dialPortFor(cfg, e, l.Port)
+			if !seen[port] {
+				seen[port] = true
+				out = append(out, Fix{fmt.Sprintf("nginx serves %s on port %d; trace that instead", t.Host, port), fmt.Sprintf("waypoint %s:%d%s", t.Host, port, pathArg(t.Path))})
+			}
+		}
+	}
+	return out
 }
 
 var nonHTTPPorts = map[int]bool{22: true, 25: true, 53: true, 3306: true, 5432: true, 6379: true, 27017: true, 5672: true, 9092: true, 11211: true, 2181: true, 4222: true}
@@ -123,6 +159,9 @@ func probeSteps(p *Probe, indent int) []Step {
 			continue
 		}
 		ds := probeSteps(d.Probe, indent+1)
+		if network.IsLocal(d.Name) && p.Container != nil && !d.Probe.TCP.OK() && len(ds) > 0 {
+			ds[0].Status, ds[0].Detail = Fail, "localhost here is the "+p.Container.DisplayName()+" container itself"
+		}
 		if d.EnvKey != "" && len(ds) > 0 {
 			ds[0].Detail = joinDetail(ds[0].Detail, "via "+d.EnvKey)
 		}
@@ -285,9 +324,6 @@ func (e *Env) traceNginx(cfg *nginx.Config, t Target) *Report {
 		fs = append(fs, e.nginxDown(cfg, nc, dialPort))
 	}
 
-	if f := testFailure(cfg); f != nil && listener.OK() {
-		fs = append(fs, f)
-	}
 	r.Steps = append(r.Steps, Step{Status: Pass, Text: "server " + m.Server.DisplayName(), Detail: m.ServerReason, Pos: shortPos(m.Server.Pos)})
 	switch {
 	case m.Location == nil && m.Server.Return != nil:
@@ -313,6 +349,10 @@ func (e *Env) traceNginx(cfg *nginx.Config, t Target) *Report {
 		}
 	}
 	e.finish(r, fs)
+	// A failing nginx -t matters for the next reload, not for whether this request works now.
+	if f := e.testFailure(cfg); f != nil && listener.OK() {
+		r.Others = append(r.Others, f)
+	}
 	if r.OK() {
 		r.Summary = t.Host + t.Path + " → nginx"
 		if m.Location != nil {
@@ -492,7 +532,7 @@ func (e *Env) nginxDown(cfg *nginx.Config, nc *docker.Container, port int) *Find
 	return f
 }
 
-func testFailure(cfg *nginx.Config) *Finding {
+func (e *Env) testFailure(cfg *nginx.Config) *Finding {
 	if cfg.TestError == "" {
 		return nil
 	}
@@ -500,7 +540,7 @@ func testFailure(cfg *nginx.Config) *Finding {
 	if cfg.Container != "" {
 		cmd = "docker exec " + cfg.Container + " nginx -t"
 	}
-	return &Finding{
+	f := &Finding{
 		Title:      "nginx config test fails: " + cfg.TestError,
 		Detail:     "A running nginx keeps serving its old config, but it will refuse to reload or restart with this one.",
 		Confidence: 0.7,
@@ -508,7 +548,26 @@ func testFailure(cfg *nginx.Config) *Finding {
 		Evidence:   []Evidence{fail("nginx -t: %s", cfg.TestError)},
 		Fixes:      []Fix{{"Re-run the test after fixing", cmd}},
 	}
+	// Docker DNS only knows a container while it runs, so a down upstream also breaks nginx -t.
+	if m := upstreamHost.FindStringSubmatch(cfg.TestError); m != nil {
+		if nc := e.nginxContainer(cfg); nc != nil {
+			snap := e.Docker()
+			c := snap.ByService(nc.Project, m[1])
+			if c == nil {
+				c = snap.ByName(m[1], nc.NetworkNames())
+			}
+			if c != nil && !c.Running() {
+				f.Title = fmt.Sprintf("nginx can't reload or restart while %s is down", m[1])
+				f.Detail = fmt.Sprintf("Docker resolves the name %s only while that container runs. nginx -t passes again once %s is up.", m[1], m[1])
+				f.Evidence = append(f.Evidence, fail("%s: %s", c.Name, c.StateText()))
+				f.Confidence = 0.5
+			}
+		}
+	}
+	return f
 }
+
+var upstreamHost = regexp.MustCompile(`host not found in upstream "([^":/]+)`)
 
 func (e *Env) nginx5xx(cfg *nginx.Config, nc *docker.Container, h *network.HTTPResult, loc *nginx.Location) *Finding {
 	f := &Finding{

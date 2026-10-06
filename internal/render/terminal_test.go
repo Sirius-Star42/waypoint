@@ -52,7 +52,7 @@ func TestMermaidCollapsesStoppedProjects(t *testing.T) {
 	var buf bytes.Buffer
 	Mermaid(&buf, nil, inv)
 	out := buf.String()
-	if !strings.Contains(out, `n0["shop<br/>docker compose · 2 services<br/>stopped 2 days ago"]`) || strings.Contains(out, "api") {
+	if !strings.Contains(out, `n0("<b>shop</b><br/><small>docker compose · 2 services</small><br/><small>stopped 2 days ago</small>")`) || strings.Contains(out, "api") {
 		t.Errorf("a stopped project should be a single node:\n%s", out)
 	}
 }
@@ -77,7 +77,24 @@ func TestMermaidLinkRoundTrip(t *testing.T) {
 	if err := json.Unmarshal(data, &state); err != nil {
 		t.Fatal(err)
 	}
-	if !strings.HasPrefix(state.Code, "flowchart LR\n") || !strings.Contains(state.Code, "shop") {
+	if !strings.Contains(state.Code, "\nflowchart LR\n") || !strings.Contains(state.Code, "shop") {
 		t.Errorf("code = %q", state.Code)
+	}
+}
+
+func TestServiceShape(t *testing.T) {
+	for _, tt := range []struct {
+		name, image string
+		want        shape
+	}{
+		{"postgres", "", cylinder},
+		{"cache", "redis:7-alpine", cylinder},
+		{"tribe_dev_db", "", cylinder},
+		{"api", "python:3.12", rounded},
+		{"dashboard", "", rounded},
+	} {
+		if got := serviceShape(tt.name, tt.image); got != tt.want {
+			t.Errorf("serviceShape(%q, %q) = %v", tt.name, tt.image, got)
+		}
 	}
 }

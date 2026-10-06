@@ -97,7 +97,7 @@ func (e *Env) Map() (*MapReport, error) {
 		}
 		e.mapLocations(r, ms, s.Locations, 0, seen)
 	}
-	if f := testFailure(cfg); f != nil && len(r.Down) == 0 {
+	if f := e.testFailure(cfg); f != nil && len(r.Down) == 0 {
 		r.Issues = append(r.Issues, f)
 	}
 	for _, c := range cfg.Conflicts {
@@ -230,6 +230,9 @@ func depSteps(p *Probe) []Step {
 		st, detail := probeStatus(d.Probe)
 		if d.Probe.TCP.Class == network.Unknown && st == Warn {
 			st = Info
+		}
+		if network.IsLocal(d.Name) && p.Container != nil && !d.Probe.TCP.OK() {
+			st, detail = Fail, "localhost here is the "+p.Container.DisplayName()+" container itself"
 		}
 		text := d.Probe.Addr()
 		if d.EnvKey != "" {

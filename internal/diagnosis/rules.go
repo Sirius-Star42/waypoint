@@ -61,6 +61,11 @@ func (e *Env) analyze(p *Probe, depth int, seen map[*Probe]bool) []*Finding {
 	}
 	seen[p] = true
 	var out []*Finding
+	// With several stopped candidates for a port, the dependencies of whichever one was probed are noise.
+	if f := e.rule(p); f != nil && f.Code == "port-candidates" {
+		f.Depth = depth
+		return []*Finding{f}
+	}
 	for _, d := range p.Deps {
 		if f := localhostDep(p, d, e.Docker()); f != nil {
 			f.Depth = depth + 1
@@ -110,6 +115,9 @@ func (e *Env) rule(p *Probe) *Finding {
 				{"or, for an app running on the host:", "proxy_pass http://host.docker.internal:" + strconv.Itoa(p.Port) + ";"},
 			},
 		}
+
+	case c != nil && !c.Running() && p.Via == nil && len(e.Docker().AllByHostPort(p.Port)) > 1:
+		return portCandidates(p.Port, e.Docker().AllByHostPort(p.Port))
 
 	case c != nil && (c.Status == "exited" || c.Status == "dead" || c.Status == "created"):
 		return &Finding{
@@ -352,12 +360,52 @@ func localhostDep(p *Probe, d *Dep, snap *docker.Snapshot) *Finding {
 	if target != nil {
 		svc := target.DisplayName()
 		f.Evidence = append(f.Evidence, pass("%s exposes %d and is reachable as %s:%d", target.Name, port, svc, port))
+		where := ""
+		if len(p.Container.ComposeFiles) > 0 {
+			where = "In " + shortPath(p.Container.ComposeFiles[0]) + ", u"
+		} else {
+			where = "U"
+		}
+		recreate := "docker compose up -d " + self
+		if p.Container.WorkingDir != "" {
+			recreate = "cd " + p.Container.WorkingDir + " && " + recreate
+		}
 		f.Fixes = []Fix{
-			{"Use the service name instead of " + d.Name + " (password hidden)", d.EnvKey + "=" + redact(replaceHost(d.EnvVal, svc))},
-			{"Then recreate the container", "docker compose up -d " + self},
+			{where + "se the service name instead of " + d.Name + " (password hidden)", d.EnvKey + "=" + redact(replaceHost(d.EnvVal, svc))},
+			{"Then recreate the container", recreate},
 		}
 	}
 	f.Logs, f.LogSource = p.Logs, p.LogSource
+	return f
+}
+
+// portCandidates answers "which of my projects was on this port?" when several stopped containers publish it.
+func portCandidates(port int, cs []*docker.Container) *Finding {
+	sort.SliceStable(cs, func(i, j int) bool { return cs[i].Finished.After(cs[j].Finished) })
+	f := &Finding{
+		Code:       "port-candidates",
+		Title:      fmt.Sprintf("nothing is running on port %d; %d stopped containers use it", port, len(cs)),
+		Detail:     "Start the one you meant to run.",
+		Confidence: 0.9,
+	}
+	names := make([]string, len(cs))
+	w := 0
+	for i, c := range cs {
+		names[i] = c.Name
+		if c.Project != "" {
+			names[i] = c.Project + " · " + c.Service
+		}
+		w = max(w, len([]rune(names[i])))
+	}
+	for i, c := range cs {
+		where := names[i]
+		f.Evidence = append(f.Evidence, warn("%-*s  %s", w, where, joinWords("stopped", Ago(c.Finished))))
+		if i < 3 {
+			fix := startContainer(c)
+			fix.Text = "Start " + where
+			f.Fixes = append(f.Fixes, fix)
+		}
+	}
 	return f
 }
 
