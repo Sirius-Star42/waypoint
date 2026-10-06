@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
+	"runtime"
 	"sort"
 	"strings"
 	"time"
@@ -24,6 +26,7 @@ type options struct {
 	timeout time.Duration
 	nginx   string
 	mermaid bool
+	open    bool
 }
 
 func New(version string, stdout io.Writer) *cobra.Command {
@@ -38,7 +41,8 @@ checks every hop against what is actually running, and explains what is broken.
   waypoint 8080                 why isn't localhost:8080 working?
   waypoint api.example.com      trace a domain through nginx to the app
   waypoint https://x.dev/api    trace one URL, including the nginx location
-  waypoint map --mermaid        the route map as a Mermaid diagram`,
+  waypoint map --open           the route map as a diagram in your browser
+  waypoint map --mermaid        the route map as Mermaid, to paste into a README`,
 		Args:          cobra.MaximumNArgs(1),
 		Version:       version,
 		SilenceUsage:  true,
@@ -63,6 +67,7 @@ checks every hop against what is actually running, and explains what is broken.
 		},
 	}
 	mapCmd.Flags().BoolVar(&o.mermaid, "mermaid", false, "print the map as a Mermaid diagram (renders on GitHub)")
+	mapCmd.Flags().BoolVar(&o.open, "open", false, "open the map as a diagram on mermaid.live (prints the link over SSH)")
 	root.AddCommand(mapCmd)
 	root.SetOut(stdout)
 	return root
@@ -102,6 +107,14 @@ func (o *options) routeMap(ctx context.Context, w io.Writer) error {
 		return err
 	}
 	inv := e.Inventory()
+	if o.open {
+		link := render.MermaidLink(r, inv)
+		if !openBrowser(link) {
+			fmt.Fprintln(w, "Open this link in a browser to see the map:")
+		}
+		fmt.Fprintln(w, link)
+		return nil
+	}
 	if o.mermaid {
 		render.Mermaid(w, r, inv)
 		return nil
@@ -118,6 +131,18 @@ func (o *options) routeMap(ctx context.Context, w io.Writer) error {
 		return ExitProblems
 	}
 	return nil
+}
+
+// openBrowser opens url locally; over SSH there is no browser to open, so the caller prints it.
+func openBrowser(url string) bool {
+	if os.Getenv("SSH_CONNECTION") != "" {
+		return false
+	}
+	name := "xdg-open"
+	if runtime.GOOS == "darwin" {
+		name = "open"
+	}
+	return exec.Command(name, url).Run() == nil
 }
 
 func merge(r *diagnosis.MapReport, inv *diagnosis.Inventory) []*diagnosis.Finding {

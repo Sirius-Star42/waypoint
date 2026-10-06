@@ -78,7 +78,7 @@ func (p *Printer) Overview(r *diagnosis.MapReport, inv *diagnosis.Inventory, iss
 	if inv != nil {
 		p.apps(inv, r != nil)
 	}
-	p.problems(issues, r != nil)
+	p.problems(issues, r != nil, inv)
 }
 
 func (p *Printer) section(title, sub string) {
@@ -195,17 +195,20 @@ func (p *Printer) apps(inv *diagnosis.Inventory, haveNginx bool) {
 			down++
 		}
 	}
-	sub := plural(len(active), "app") + " on this machine"
+	sub := "nothing running"
+	if len(active) > 0 {
+		sub = plural(len(active), "app") + " on this machine"
+	}
 	if down > 0 {
 		sub += fmt.Sprintf(" · %d with problems", down)
 	}
 	if len(stopped) > 0 {
-		sub += fmt.Sprintf(" · %d stopped", len(stopped))
+		sub += " · " + plural(len(stopped), "stopped compose project")
+	}
+	if len(inv.Stopped) > 0 {
+		sub += " · " + plural(len(inv.Stopped), "old container")
 	}
 	p.section("APPS", sub)
-	if len(active) == 0 {
-		p.f("  %s\n", p.c(dim, "nothing found listening on a port"))
-	}
 	nameW := 0
 	for _, a := range active {
 		nameW = max(nameW, utf8.RuneCountInString(a.Name))
@@ -214,7 +217,11 @@ func (p *Printer) apps(inv *diagnosis.Inventory, haveNginx bool) {
 	for _, a := range active {
 		p.f("\n%s %s  %s\n", p.icon(a.Status), p.c(bold, pad(a.Name, nameW)), p.detail(stateStatus(a.Status), a.Kind+" · "+a.State))
 		for _, f := range a.Facts {
-			if f.Label != "manage" {
+			switch f.Label {
+			case "manage":
+			case "folder", "file", "unit file":
+				p.fact(f.Label, truncate(tildePath(f.Value), 110))
+			default:
 				p.fact(f.Label, truncate(f.Value, 110))
 			}
 		}
@@ -230,23 +237,24 @@ func (p *Printer) apps(inv *diagnosis.Inventory, haveNginx bool) {
 		}
 	}
 	if len(stopped) > 0 {
-		p.f("\n%s\n", p.c(bold, "Stopped"))
-		w := 0
+		rows := [][]string{{"NAME", "STOPPED", "COMPOSE FILE"}}
 		for _, a := range stopped {
-			w = max(w, utf8.RuneCountInString(a.Name))
-		}
-		for _, a := range stopped {
-			where := ""
+			file := ""
 			for _, f := range a.Facts {
 				if f.Label == "file" {
-					where = " · " + f.Value
+					file = tildePath(f.Value)
 				}
 			}
-			p.f("  %s %s  %s\n", p.icon(diagnosis.Info), pad(a.Name, w), p.c(dim, a.Kind+" · "+a.State+where))
+			rows = append(rows, []string{a.Name, orUnknown(diagnosis.Ago(a.StoppedAt)), file})
 		}
+		p.table("STOPPED PROJECTS", rows)
 	}
 	if len(inv.Stopped) > 0 {
-		p.f("  %s %s\n", p.icon(diagnosis.Info), p.c(dim, "containers: "+strings.Join(inv.Stopped, " · ")))
+		rows := [][]string{{"NAME", "STATE", "STOPPED"}}
+		for _, c := range inv.Stopped {
+			rows = append(rows, []string{c.Name, c.State, orUnknown(diagnosis.Ago(c.At))})
+		}
+		p.table("OLD CONTAINERS", rows)
 	}
 	if len(inv.Elsewhere) > 0 {
 		p.f("\n%s\n", p.c(bold, "On other machines"))
@@ -264,10 +272,69 @@ func (p *Printer) apps(inv *diagnosis.Inventory, haveNginx bool) {
 		}
 		p.fact("hidden", strings.Join(ports, " ")+p.c(dim, "  owned by other users; run with sudo to see them"))
 	}
-	if len(inv.System) > 0 {
-		p.fact("system", p.c(dim, truncate(strings.Join(inv.System, " · "), 110)))
+	if len(inv.System) > 0 && p.Verbose {
+		for i, sys := range inv.System {
+			label := ""
+			if i == 0 {
+				label = "system"
+			}
+			p.fact(label, p.c(dim, sys))
+		}
+	} else if n := len(inv.System); n > 0 {
+		msg := "1 system process hidden (-v to show)"
+		if n > 1 {
+			msg = fmt.Sprintf("%d system processes hidden (-v to show)", n)
+		}
+		p.f("  %s %s\n", p.icon(diagnosis.Info), p.c(dim, msg))
 	}
 	p.f("\n")
+}
+
+// table prints rows as aligned columns under a title; the first row is the header.
+func (p *Printer) table(title string, rows [][]string) {
+	widths := make([]int, len(rows[0]))
+	for _, r := range rows {
+		for i, cell := range r {
+			widths[i] = max(widths[i], utf8.RuneCountInString(cell))
+		}
+	}
+	p.f("\n%s\n", p.c(bold, title))
+	for n, r := range rows {
+		var cells []string
+		for i, cell := range r {
+			if i < len(r)-1 {
+				cell = pad(cell, widths[i])
+			}
+			cells = append(cells, cell)
+		}
+		line := strings.TrimRight(strings.Join(cells, "   "), " ")
+		if n == 0 {
+			line = p.c(dim, line)
+		}
+		p.f("  %s\n", line)
+	}
+}
+
+func orUnknown(s string) string {
+	if s == "" {
+		return "unknown"
+	}
+	return s
+}
+
+// tildePath shortens paths under the user's home directory to ~/...
+func tildePath(path string) string {
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" || home == "/" {
+		return path
+	}
+	if path == home {
+		return "~"
+	}
+	if rest, ok := strings.CutPrefix(path, home+"/"); ok {
+		return "~/" + rest
+	}
+	return path
 }
 
 func (p *Printer) fact(label, value string) {
@@ -344,11 +411,13 @@ func stateStatus(s diagnosis.Status) diagnosis.Status {
 	return s
 }
 
-func (p *Printer) problems(fs []*diagnosis.Finding, haveNginx bool) {
+func (p *Printer) problems(fs []*diagnosis.Finding, haveNginx bool, inv *diagnosis.Inventory) {
 	if len(fs) == 0 {
 		msg := "everything checks out"
 		if haveNginx {
 			msg = "every route and app checks out"
+		} else if inv != nil && !inv.Running() {
+			msg = "no problems · nothing is running"
 		}
 		p.f("%s %s\n", p.icon(diagnosis.Pass), p.c(green, msg))
 		return
