@@ -3,15 +3,18 @@ package diagnosis
 import (
 	"fmt"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Sirius-Star42/waypoint/internal/collector/docker"
 	"github.com/Sirius-Star42/waypoint/internal/collector/network"
 	"github.com/Sirius-Star42/waypoint/internal/collector/process"
+	"github.com/Sirius-Star42/waypoint/internal/collector/usage"
 	"github.com/Sirius-Star42/waypoint/internal/nginx"
 )
 
@@ -48,6 +51,8 @@ type App struct {
 	Notes     []string
 	Stopped   bool
 	StoppedAt time.Time
+	Usage     *usage.Usage
+	pid       int
 	single    *AppService
 }
 
@@ -66,6 +71,15 @@ type AppService struct {
 	State     string
 	Ports     []AppPort
 	Container *docker.Container
+	Links     []Link
+	Usage     *usage.Usage
+}
+
+// Link is a connection a container makes: to a service of its compose project, or to localhost.
+type Link struct {
+	Service string // compose service in the same project
+	Addr    string // set for localhost, which inside a container is the container itself
+	Via     string // env var holding the address, or "depends_on"
 }
 
 type appRef struct {
@@ -213,6 +227,7 @@ func (e *Env) Inventory() *Inventory {
 		}
 		return strings.ToLower(a.Name) < strings.ToLower(b.Name)
 	})
+	e.readUsage(inv)
 	e.inventoryIssues(inv, snap)
 	return inv
 }
@@ -228,7 +243,7 @@ func (e *Env) containerApps(inv *Inventory, snap *docker.Snapshot, routes map[st
 			inv.Stopped = append(inv.Stopped, StoppedContainer{Name: c.Name, State: stoppedState(c), At: c.Finished})
 			continue
 		}
-		svc := &AppService{Name: c.DisplayName(), Container: c}
+		svc := &AppService{Name: c.DisplayName(), Container: c, Links: containerLinks(c, snap)}
 		svc.Status, svc.State = containerState(c)
 		for _, b := range c.Bindings {
 			l := process.Listener{Port: b.HostPort, Addr: b.HostIP}
@@ -240,11 +255,16 @@ func (e *Env) containerApps(inv *Inventory, snap *docker.Snapshot, routes map[st
 		if len(svc.Ports) == 0 && len(routes["container:"+c.ID]) > 0 {
 			svc.Ports = []AppPort{{Routes: routes["container:"+c.ID]}}
 		}
+		note := publicDatastore(svc)
 		if c.Project == "" {
 			a := &App{Name: c.Name, Kind: "docker container", Status: svc.Status, State: svc.State, single: svc}
 			a.Facts = append(a.Facts, Fact{"image", c.Image})
 			a.Ports = svc.Ports
 			a.Facts = append(a.Facts, Fact{"manage", "docker logs -f " + c.Name + "  ·  docker restart " + c.Name})
+			if note != "" {
+				a.Status = Warn
+				a.Notes = append(a.Notes, note)
+			}
 			inv.keys["container:"+c.ID] = appRef{app: a, svc: svc}
 			for _, b := range c.Bindings {
 				inv.keys["port:"+strconv.Itoa(b.HostPort)] = appRef{app: a, svc: svc}
@@ -265,6 +285,9 @@ func (e *Env) containerApps(inv *Inventory, snap *docker.Snapshot, routes map[st
 			out = append(out, a)
 		}
 		a.Services = append(a.Services, svc)
+		if note != "" {
+			a.Notes = append(a.Notes, note)
+		}
 		inv.keys["container:"+c.ID] = appRef{app: a, svc: svc}
 		for _, b := range c.Bindings {
 			inv.keys["port:"+strconv.Itoa(b.HostPort)] = appRef{app: a, svc: svc}
@@ -310,6 +333,141 @@ func (e *Env) containerApps(inv *Inventory, snap *docker.Snapshot, routes map[st
 	return out
 }
 
+var datastore = regexp.MustCompile(`(?i)(^|[^a-z])(postgres|postgresql|mysql|mariadb|redis|valkey|mongo|mongodb|memcached|elasticsearch|opensearch|clickhouse|db|database)([^a-z]|$)`)
+
+// IsDatastore tells databases and caches apart from apps by service name or image.
+func IsDatastore(name, image string) bool {
+	return datastore.MatchString(name) || datastore.MatchString(image)
+}
+
+// browserVar holds a URL the browser opens (NEXT_PUBLIC_API_URL=http://localhost:8000), not one
+// the container itself connects to.
+func browserVar(key, val string) bool {
+	for _, p := range []string{"NEXT_PUBLIC_", "VITE_", "REACT_APP_", "PUBLIC_", "NUXT_PUBLIC_"} {
+		if strings.HasPrefix(key, p) {
+			return true
+		}
+	}
+	return strings.HasPrefix(val, "http://") || strings.HasPrefix(val, "https://")
+}
+
+// publicDatastore flags a running database container published on all interfaces: other machines
+// can reach it, and on Linux Docker's own iptables rules bypass ufw and firewalld.
+func publicDatastore(svc *AppService) string {
+	c := svc.Container
+	if !c.Running() || !IsDatastore(c.Service, c.Image) {
+		return ""
+	}
+	for _, p := range svc.Ports {
+		if p.Port != 0 && !p.Local {
+			if svc.Status == Pass {
+				svc.Status = Warn
+			}
+			why := ""
+			if runtime.GOOS == "linux" {
+				why = " (Docker bypasses ufw/firewalld)"
+			}
+			return fmt.Sprintf("%s publishes :%d on all interfaces, so other machines can reach it%s; "+
+				"use 127.0.0.1:%d:%d in compose if only this machine needs it", svc.Name, p.Port, why, p.Port, containerPortOf(c, p.Port))
+		}
+	}
+	return ""
+}
+
+func containerPortOf(c *docker.Container, hostPort int) int {
+	for _, b := range c.Bindings {
+		if b.HostPort == hostPort {
+			return b.ContainerPort
+		}
+	}
+	return hostPort
+}
+
+func containerLinks(c *docker.Container, snap *docker.Snapshot) []Link {
+	// Databases share env files with the app but don't call it.
+	if IsDatastore(c.Service, c.Image) {
+		return nil
+	}
+	var out []Link
+	seen := map[string]bool{}
+	for _, d := range envDeps(c, snap) {
+		if network.IsLocal(d.Name) {
+			if browserVar(d.EnvKey, d.EnvVal) {
+				continue
+			}
+			host, port := urlHostPort(d.EnvVal)
+			out = append(out, Link{Addr: host + ":" + strconv.Itoa(port), Via: d.EnvKey})
+			continue
+		}
+		if t := snap.ByService(c.Project, d.Name); t != nil && c.Project != "" && t.Service != c.Service {
+			out = append(out, Link{Service: t.Service, Via: d.EnvKey})
+			seen[t.Service] = true
+		}
+	}
+	for _, s := range c.DependsOn {
+		if !seen[s] {
+			out = append(out, Link{Service: s, Via: "depends_on"})
+		}
+	}
+	return out
+}
+
+// readUsage fills in CPU and memory for running apps; a compose project gets the sum of its services.
+func (e *Env) readUsage(inv *Inventory) {
+	var pids []int
+	running := false
+	for _, a := range inv.Apps {
+		if a.pid > 0 {
+			pids = append(pids, a.pid)
+		}
+		for _, s := range a.Services {
+			running = running || s.Container.Running()
+		}
+		running = running || a.single != nil && a.single.Container.Running()
+	}
+	var procs map[int]usage.Usage
+	var ctrs map[string]usage.Usage
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() { defer wg.Done(); procs = usage.Processes(e.Ctx, e.Runner, pids) }()
+	go func() {
+		defer wg.Done()
+		if running && e.Runner.Has("docker") {
+			ctrs = usage.Containers(e.Ctx, e.Runner)
+		}
+	}()
+	wg.Wait()
+	byID := func(c *docker.Container) *usage.Usage {
+		for id, u := range ctrs {
+			if c.Running() && strings.HasPrefix(c.ID, id) {
+				return &u
+			}
+		}
+		return nil
+	}
+	for _, a := range inv.Apps {
+		if u, ok := procs[a.pid]; ok && a.pid > 0 {
+			a.Usage = &u
+		}
+		if a.single != nil {
+			a.single.Usage = byID(a.single.Container)
+			a.Usage = a.single.Usage
+		}
+		var total *usage.Usage
+		for _, s := range a.Services {
+			if s.Usage = byID(s.Container); s.Usage != nil {
+				if total == nil {
+					total = &usage.Usage{}
+				}
+				*total = total.Add(*s.Usage)
+			}
+		}
+		if total != nil {
+			a.Usage = total
+		}
+	}
+}
+
 func containerState(c *docker.Container) (Status, string) {
 	switch {
 	case c.Status == "running" && c.Health == "unhealthy":
@@ -353,7 +511,7 @@ func stoppedState(c *docker.Container) string {
 }
 
 func (e *Env) unitApp(o *process.Owner) *App {
-	a := &App{Name: strings.TrimSuffix(o.Unit, ".service"), Kind: "systemd service", Status: Pass}
+	a := &App{Name: strings.TrimSuffix(o.Unit, ".service"), Kind: "systemd service", Status: Pass, pid: o.PID}
 	u := e.Systemd().Status(e.Ctx, o.Unit)
 	cmd, dir, started, file, usr := o.ShortCmdline(), o.Cwd, o.Started, "", o.User
 	if u != nil {
@@ -381,7 +539,7 @@ func (e *Env) unitApp(o *process.Owner) *App {
 }
 
 func processApp(o *process.Owner) *App {
-	a := &App{Name: appName(o), Kind: "process", Status: Pass, State: "running for " + since(o.Started)}
+	a := &App{Name: appName(o), Kind: "process", Status: Pass, State: "running for " + since(o.Started), pid: o.PID}
 	a.Facts = appendFact(a.Facts, "command", o.ShortCmdline())
 	a.Facts = appendFact(a.Facts, "program", o.Exe)
 	a.Facts = appendFact(a.Facts, "folder", o.Cwd)

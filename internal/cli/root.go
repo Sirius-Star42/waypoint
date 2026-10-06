@@ -114,16 +114,18 @@ func (o *options) routeMap(ctx context.Context, w io.Writer) error {
 	inv := e.Inventory()
 	if o.open {
 		link := render.MermaidLink(r, inv)
-		if !openBrowser(link) {
+		if openBrowser(link) {
+			fmt.Fprintln(w, "Opened the map in your browser:", render.Hyperlink(w, link))
+		} else {
 			fmt.Fprintln(w, "Open this link in a browser to see the map:")
+			fmt.Fprintln(w, render.Hyperlink(w, link))
 		}
-		fmt.Fprintln(w, link)
 		return nil
 	}
 	if o.mermaid {
 		render.Mermaid(w, r, inv)
 		// stderr, so `waypoint map --mermaid > map.md` stays a clean diagram.
-		fmt.Fprintf(os.Stderr, "\nView it in your browser (the diagram travels inside the link, nothing is uploaded):\n%s\n", render.MermaidLink(r, inv))
+		fmt.Fprintf(os.Stderr, "\nView it in your browser (the diagram travels inside the link, nothing is uploaded):\n%s\n", render.Hyperlink(os.Stderr, render.MermaidLink(r, inv)))
 		return nil
 	}
 	issues := merge(r, inv)
