@@ -289,10 +289,20 @@ func (e *Env) traceNginx(cfg *nginx.Config, t Target) *Report {
 		fs = append(fs, f)
 	}
 	r.Steps = append(r.Steps, Step{Status: Pass, Text: "server " + m.Server.DisplayName(), Detail: m.ServerReason, Pos: shortPos(m.Server.Pos)})
-	if m.Location == nil {
+	switch {
+	case m.Location == nil && m.Server.Return != nil:
 		ret := m.Server.Return
 		r.Steps = append(r.Steps, Step{Status: Info, Text: fmt.Sprintf("return %d %s", ret.Code, ret.URL), Indent: 1})
-	} else {
+	case m.Location == nil:
+		r.Steps = append(r.Steps, Step{Status: Fail, Text: "no location matches " + t.pathOnly(), Indent: 1})
+		fs = append(fs, &Finding{
+			Title:      fmt.Sprintf("no location in %s matches %s", m.Server.DisplayName(), t.pathOnly()),
+			Detail:     "nginx has nothing to serve for this path and answers 404.",
+			Confidence: 0.7,
+			Evidence:   []Evidence{pass("server %s (%s)", m.Server.DisplayName(), shortPos(m.Server.Pos)), fail("none of its locations match %s", t.pathOnly())},
+			Fixes:      []Fix{{"Add a location for this path, or a catch-all `location /`, in " + shortPos(m.Server.Pos), ""}},
+		})
+	default:
 		loc := m.Location
 		r.Steps = append(r.Steps, Step{Status: Pass, Text: "location " + loc.String(), Pos: shortPos(loc.Pos), Indent: 1})
 		steps, more := e.locationTarget(cfg, nc, loc, 2)

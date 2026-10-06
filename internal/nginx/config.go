@@ -26,12 +26,22 @@ type Server struct {
 	Cert      string
 	Return    *Return // server-level return: applies before any location
 	Pos       string
-	// Shadowed names are already claimed on the same port by an earlier server.
-	Shadowed []string
+	// Shadowed holds, per port, the names an earlier server already claims there.
+	Shadowed map[int][]string
 }
 
+// Ignored reports whether nginx never picks this server by name: on every port it
+// listens on, all of its names belong to an earlier server.
 func (s *Server) Ignored() bool {
-	return len(s.Shadowed) > 0 && len(s.Shadowed) == len(s.Names)
+	if len(s.Shadowed) == 0 || len(s.Names) == 0 {
+		return false
+	}
+	for _, l := range s.Listens {
+		if l.Unix == "" && len(s.Shadowed[l.Port]) < len(s.Names) {
+			return false
+		}
+	}
+	return true
 }
 
 type Listen struct {
@@ -406,17 +416,34 @@ func conflicts(servers []*Server) []Conflict {
 				continue
 			}
 			for _, l := range s.Listens {
-				k := key{strings.ToLower(n), l.Port}
-				if f, ok := first[k]; ok && f != s {
-					out = append(out, Conflict{Name: n, Port: l.Port, Used: f.Pos, Ignored: s.Pos})
-					s.Shadowed = append(s.Shadowed, n)
-					break
+				if l.Unix != "" {
+					continue
 				}
-				first[k] = s
+				k := key{strings.ToLower(n), l.Port}
+				f, ok := first[k]
+				switch {
+				case !ok:
+					first[k] = s
+				case f != s && !containsStr(s.Shadowed[l.Port], n):
+					out = append(out, Conflict{Name: n, Port: l.Port, Used: f.Pos, Ignored: s.Pos})
+					if s.Shadowed == nil {
+						s.Shadowed = map[int][]string{}
+					}
+					s.Shadowed[l.Port] = append(s.Shadowed[l.Port], n)
+				}
 			}
 		}
 	}
 	return out
+}
+
+func containsStr(list []string, s string) bool {
+	for _, v := range list {
+		if v == s {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *Server) DisplayName() string {

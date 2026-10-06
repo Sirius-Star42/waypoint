@@ -265,3 +265,53 @@ func TestRootPrefersRealFailureOverDeeperOne(t *testing.T) {
 		t.Errorf("a lone symptom is still reported, got %q", root.Title)
 	}
 }
+
+func TestNoMatchingLocation(t *testing.T) {
+	front := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(404) }))
+	defer front.Close()
+	_, port, _ := net.SplitHostPort(front.Listener.Addr().String())
+	dir := t.TempDir()
+	conf := `http { server { listen ` + port + `; server_name only-api.test; location /api/ { proxy_pass http://127.0.0.1:1; } } }`
+	os.WriteFile(filepath.Join(dir, "nginx.conf"), []byte(conf), 0o644)
+	e := testEnv(t, nil)
+	e.NginxPath = filepath.Join(dir, "nginx.conf")
+	tgt, _ := ParseTarget("http://localhost:" + port + "/")
+	r := e.Diagnose(tgt)
+	if r.OK() || !strings.Contains(r.Root.Title, "no location in only-api.test matches /") {
+		t.Fatalf("root = %+v", r.Root)
+	}
+}
+
+func TestLocalhostInNginxContainerThatWorks(t *testing.T) {
+	ng := &docker.Container{Name: "web-nginx-1", Status: "running"}
+	e := testEnv(t, &docker.Snapshot{Containers: []*docker.Container{ng}})
+	p := &Probe{Host: "127.0.0.1", Port: 9000, Via: ng, Container: ng, TCP: network.Result{Class: network.OK}}
+	if f := e.rule(p); f != nil {
+		t.Fatalf("a reachable php-fpm/sidecar on localhost is fine, got %q", f.Title)
+	}
+	p.TCP = network.Result{Class: network.Refused}
+	if f := e.rule(p); f == nil || !strings.Contains(f.Title, "container itself") {
+		t.Fatalf("refused localhost inside nginx container should be flagged, got %+v", f)
+	}
+}
+
+type hangingRunner struct{ runner.Fake }
+
+func (hangingRunner) Combined(ctx context.Context, name string, args ...string) (string, error) {
+	<-ctx.Done()
+	return "", ctx.Err()
+}
+
+func TestDialFromRespectsTimeout(t *testing.T) {
+	e := testEnv(t, nil)
+	e.Runner = hangingRunner{}
+	e.Timeout = 100 * time.Millisecond
+	start := time.Now()
+	r := e.dialFrom(&docker.Container{Name: "nginx"}, "api", 8080)
+	if took := time.Since(start); took > 3*time.Second {
+		t.Fatalf("took %s, want about timeout + docker exec slack", took)
+	}
+	if r.Class != network.Timeout {
+		t.Errorf("class = %s", r.Class)
+	}
+}

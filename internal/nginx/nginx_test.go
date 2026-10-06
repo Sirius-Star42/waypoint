@@ -137,3 +137,33 @@ func TestParseErrors(t *testing.T) {
 		}
 	}
 }
+
+func TestConflictIsPerPort(t *testing.T) {
+	src := `http {
+  server { listen 80; server_name b.com; location / { proxy_pass http://127.0.0.1:1; } }
+  server { listen 80; listen 443 ssl; server_name b.com; location / { proxy_pass http://127.0.0.1:2; } }
+  server { listen 80; listen 443 ssl; server_name b.com; location / { proxy_pass http://127.0.0.1:3; } }
+}`
+	dirs, _, _, err := Parse(dumpFS{"/n.conf": src}, "/n.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cfg := Build(dirs)
+	second, third := cfg.Servers[1], cfg.Servers[2]
+	if second.Ignored() {
+		t.Error("the second server is the only one for b.com on 443 and must not be ignored")
+	}
+	if !third.Ignored() {
+		t.Error("the third server is shadowed on both ports")
+	}
+	if m := cfg.Route("b.com", 443, "/"); m == nil || m.Server != second {
+		t.Errorf("b.com:443 should route to the second server")
+	}
+	var ports []int
+	for _, c := range cfg.Conflicts {
+		ports = append(ports, c.Port)
+	}
+	if len(cfg.Conflicts) != 3 {
+		t.Errorf("want conflicts 80 (2nd), 80 and 443 (3rd), got ports %v", ports)
+	}
+}
