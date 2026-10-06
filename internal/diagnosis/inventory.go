@@ -384,7 +384,6 @@ func containerPortOf(c *docker.Container, hostPort int) int {
 }
 
 func containerLinks(c *docker.Container, snap *docker.Snapshot) []Link {
-	// Databases share env files with the app but don't call it.
 	if IsDatastore(c.Service, c.Image) {
 		return nil
 	}
@@ -392,9 +391,6 @@ func containerLinks(c *docker.Container, snap *docker.Snapshot) []Link {
 	seen := map[string]bool{}
 	for _, d := range envDeps(c, snap) {
 		if network.IsLocal(d.Name) {
-			if browserVar(d.EnvKey, d.EnvVal) {
-				continue
-			}
 			host, port := urlHostPort(d.EnvVal)
 			out = append(out, Link{Addr: host + ":" + strconv.Itoa(port), Via: d.EnvKey})
 			continue
