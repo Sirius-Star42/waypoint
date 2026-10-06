@@ -8,6 +8,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/Sirius-Star42/waypoint/internal/collector/network"
+	"github.com/Sirius-Star42/waypoint/internal/collector/usage"
 	"github.com/Sirius-Star42/waypoint/internal/diagnosis"
 	"github.com/Sirius-Star42/waypoint/internal/nginx"
 )
@@ -144,6 +145,10 @@ func (p *Printer) sites(r *diagnosis.MapReport, inv *diagnosis.Inventory) {
 			line := fmt.Sprintf("%s%s  → %s  %s %s", p.c(dim, branch), loc, pad(e.Target, tgtW), p.icon(e.Status), p.detail(e.Status, detail))
 			p.f("%s\n", strings.TrimRight(line, " "))
 			subs := e.Sub
+			subW := 0
+			for _, sub := range subs {
+				subW = max(subW, utf8.RuneCountInString(sub.Text))
+			}
 			for j, sub := range subs {
 				sb := "└─ "
 				if j < len(subs)-1 {
@@ -153,7 +158,7 @@ func (p *Printer) sites(r *diagnosis.MapReport, inv *diagnosis.Inventory) {
 				if len(e.Probes) > 1 && j < len(e.Probes) {
 					d = appDetail(inv, e.Probes[j], sub.Status, d)
 				}
-				p.f("%s%s%s%s %s %s\n", p.c(dim, cont), strings.Repeat(" ", locW+5), p.c(dim, sb), sub.Text, p.icon(sub.Status), p.detail(sub.Status, d))
+				p.f("%s%s%s%s  %s %s\n", p.c(dim, cont), strings.Repeat(" ", locW+5), p.c(dim, sb), pad(sub.Text, subW), p.icon(sub.Status), p.detail(sub.Status, d))
 			}
 		}
 	}
@@ -308,27 +313,16 @@ func (p *Printer) apps(inv *diagnosis.Inventory, haveNginx bool) {
 
 // table prints rows as aligned columns under a title; the first row is the header.
 func (p *Printer) table(title string, rows [][]string) {
-	widths := make([]int, len(rows[0]))
-	for _, r := range rows {
-		for i, cell := range r {
-			widths[i] = max(widths[i], utf8.RuneCountInString(cell))
-		}
-	}
 	p.f("\n%s\n", p.c(bold, title))
-	for n, r := range rows {
-		var cells []string
-		for i, cell := range r {
-			if i < len(r)-1 {
-				cell = pad(cell, widths[i])
-			}
-			cells = append(cells, cell)
+	var cells [][]cell
+	for _, r := range rows[1:] {
+		var cs []cell
+		for _, v := range r {
+			cs = append(cs, cell{text: v})
 		}
-		line := strings.TrimRight(strings.Join(cells, "   "), " ")
-		if n == 0 {
-			line = p.c(dim, line)
-		}
-		p.f("  %s\n", line)
+		cells = append(cells, cs)
 	}
+	p.grid("  ", rows[0], cells)
 }
 
 func orUnknown(s string) string {
@@ -392,14 +386,12 @@ func (p *Printer) ports(ports []diagnosis.AppPort) {
 	p.fact(label, strings.Join(plain, " ")+p.c(dim, where))
 }
 
+// services prints a compose project's containers as a table; columns nothing fills are left out.
 func (p *Printer) services(svcs []*diagnosis.AppService) {
-	w := 0
+	header := []string{"SERVICE", "PORT", "ACCESS", "STATUS", "CPU", "MEM", "ROUTES"}
+	var rows [][]cell
 	for _, s := range svcs {
-		w = max(w, utf8.RuneCountInString(s.Name))
-	}
-	for _, s := range svcs {
-		var ports []string
-		var routes []string
+		var ports, routes []string
 		public := false
 		for _, port := range s.Ports {
 			if port.Port != 0 {
@@ -408,35 +400,97 @@ func (p *Printer) services(svcs []*diagnosis.AppService) {
 			}
 			routes = append(routes, port.Routes...)
 		}
-		state := p.detail(stateStatus(s.Status), s.State)
+		access := cell{}
 		switch {
 		case public:
-			state = p.c(yellow, "public") + "  " + state
+			access = cell{text: "public", color: yellow}
 		case len(ports) > 0:
-			state = p.c(dim, "local ") + "  " + state
-		case anyPorts(svcs):
-			state = "        " + state
+			access = cell{text: "local", color: dim}
 		}
+		cpu, mem := cell{}, cell{}
 		if s.Usage != nil {
-			state += p.c(dim, "  · "+s.Usage.String())
+			cpu = cell{text: fmt.Sprintf("%.1f%%", s.Usage.CPU)}
+			mem = cell{text: usage.Bytes(s.Usage.Mem)}
 		}
-		line := fmt.Sprintf("    %s %s  %s  %s", p.icon(s.Status), pad(s.Name, w), pad(strings.Join(ports, " "), 6), state)
-		if len(routes) > 0 {
-			line += "  " + p.c(dim, "← ") + strings.Join(dedupe(routes), ", ")
+		state := cell{text: s.State, color: dim}
+		switch s.Status {
+		case diagnosis.Fail:
+			state.color = red
+		case diagnosis.Warn:
+			state.color = yellow
 		}
-		p.f("%s\n", line)
+		rows = append(rows, []cell{
+			{s.Name, "", p.icon(s.Status) + " "}, {strings.Join(ports, " "), "", ""}, access, state, cpu, mem,
+			{strings.Join(dedupe(routes), ", "), dim, ""},
+		})
 	}
+	p.grid("    ", header, rows)
 }
 
-func anyPorts(svcs []*diagnosis.AppService) bool {
-	for _, s := range svcs {
-		for _, p := range s.Ports {
-			if p.Port != 0 {
-				return true
+// cell is one table value; prefix (an icon) is printed before it and not counted in the width.
+type cell struct {
+	text, color, prefix string
+}
+
+// grid prints aligned columns under a dim header and drops columns that are empty in every row.
+func (p *Printer) grid(indent string, header []string, rows [][]cell) {
+	var keep []int
+	for c := range header {
+		for _, r := range rows {
+			if r[c].text != "" {
+				keep = append(keep, c)
+				break
 			}
 		}
 	}
-	return false
+	widths := map[int]int{}
+	prefixW := 0
+	for _, c := range keep {
+		widths[c] = utf8.RuneCountInString(header[c])
+		for _, r := range rows {
+			widths[c] = max(widths[c], utf8.RuneCountInString(r[c].text))
+			if r[c].prefix != "" {
+				prefixW = 2
+			}
+		}
+	}
+	var hs []string
+	for n, c := range keep {
+		h := header[c]
+		if n == 0 {
+			h = strings.Repeat(" ", prefixW) + h
+		}
+		if n < len(keep)-1 {
+			h = pad(h, widths[c]+prefixW*boolInt(n == 0))
+		}
+		hs = append(hs, h)
+	}
+	p.f("%s%s\n", indent, p.c(dim, strings.Join(hs, "   ")))
+	for _, r := range rows {
+		var cs []string
+		for n, c := range keep {
+			text := r[c].text
+			if n < len(keep)-1 {
+				text = pad(text, widths[c])
+			}
+			v := text
+			if r[c].color != "" {
+				v = p.c(r[c].color, text)
+			}
+			if n == 0 {
+				v = r[c].prefix + v
+			}
+			cs = append(cs, v)
+		}
+		p.f("%s%s\n", indent, strings.TrimRight(strings.Join(cs, "   "), " "))
+	}
+}
+
+func boolInt(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
 }
 
 func (p *Printer) portText(port diagnosis.AppPort, haveNginx bool) string {

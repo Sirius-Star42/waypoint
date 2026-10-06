@@ -385,6 +385,10 @@ func (e *Env) probeDep(from *docker.Container, d *Dep, depth int) *Probe {
 }
 
 func envDeps(c *docker.Container, snap *docker.Snapshot) []*Dep {
+	// Databases share env files with the app but don't call it.
+	if IsDatastore(c.Service, c.Image) {
+		return nil
+	}
 	var keys []string
 	for k := range c.Env {
 		keys = append(keys, k)
@@ -398,7 +402,12 @@ func envDeps(c *docker.Container, snap *docker.Snapshot) []*Dep {
 			continue
 		}
 		if network.IsLocal(host) {
-			out = append(out, &Dep{Name: host, EnvKey: k, EnvVal: v})
+			if !browserVar(k, v) {
+				out = append(out, &Dep{Name: host, EnvKey: k, EnvVal: v})
+			}
+			continue
+		}
+		if host == c.Service || host == c.Name {
 			continue
 		}
 		if snap.ByService(c.Project, host) != nil || snap.ByName(host, c.NetworkNames()) != nil {
